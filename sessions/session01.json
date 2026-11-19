@@ -1,0 +1,55 @@
+{
+  "schema_version": 1,
+  "profile": "pt100-v2",
+  "channel_count": 3,
+  "filters": {
+    "median_enabled": true,
+    "median_window": 3,
+    "average_enabled": true,
+    "average_window": 4
+  },
+  "calibration_enabled": true,
+  "channels": [
+    {
+      "rref_x10": 43000,
+      "b": 0,
+      "k_x100": 100
+    },
+    {
+      "rref_x10": 43000,
+      "b": 0,
+      "k_x100": 100
+    },
+    {
+      "rref_x10": 43000,
+      "b": 0,
+      "k_x100": 100
+    },
+    {
+      "rref_x10": 43000,
+      "b": 0,
+      "k_x100": 100
+    },
+    {
+      "rref_x10": 43000,
+      "b": 0,
+      "k_x100": 100
+    },
+    {
+      "rref_x10": 43000,
+      "b": 0,
+      "k_x100": 100
+    },
+    {
+      "rref_x10": 43000,
+      "b": 0,
+      "k_x100": 100
+    },
+    {
+      "rref_x10": 43000,
+      "b": 0,
+      "k_x100": 100
+    }
+  ],
+  "metadata": {}
+}

@@ -1,0 +1,10 @@
+{
+  "schema_version": 1,
+  "port": "COM3",
+  "baudrate": 921600,
+  "bytesize": 8,
+  "parity": "N",
+  "stopbits": 1,
+  "timeout": 2.0,
+  "address": 1
+}

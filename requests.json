@@ -1,0 +1,66 @@
+[
+  {
+    "title": "Все T + RTC + ADC",
+    "function": 4,
+    "start": 21,
+    "count": 19
+  },
+  {
+    "title": "Температуры T0–T7",
+    "function": 4,
+    "start": 21,
+    "count": 8
+  },
+  {
+    "title": "АЦП T0–T7",
+    "function": 4,
+    "start": 32,
+    "count": 8
+  },
+  {
+    "title": "Статусы T0–T7",
+    "function": 4,
+    "start": 9,
+    "count": 8
+  },
+  {
+    "title": "Настройки прибора",
+    "function": 3,
+    "start": 0,
+    "count": 27
+  },
+  {
+    "title": "Флаги фильтров и калибровки",
+    "function": 1,
+    "start": 6,
+    "count": 3
+  },
+  {
+    "title": "Версия платы и ПО",
+    "function": 4,
+    "start": 53,
+    "count": 2
+  },
+  {
+    "title": "START",
+    "function": 5,
+    "start": 0,
+    "value": 65280
+  },
+  {
+    "title": "STOP",
+    "function": 5,
+    "start": 0,
+    "value": 0
+  },
+  {
+    "title": "Установить RTC по времени ПК",
+    "action": "rtc"
+  },
+  {
+    "title": "Диагностика MAX31865 T0 (новая прошивка)",
+    "function": 4,
+    "start": 64,
+    "count": 9
+  }
+]
