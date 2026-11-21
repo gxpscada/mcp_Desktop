@@ -9,7 +9,7 @@ from core import *
 
 class Port:
     def __init__(self, reply):
-        self.reply = reply
+        self.reply = ascii_encode(reply) if reply else reply
     def reset_input_buffer(self):
         pass
     def write(self, data):
@@ -32,7 +32,7 @@ class Tests(unittest.TestCase):
         s['channels'][0]['b'] = -5
         frames = configuration_frames(s, 1)
         for f in frames:
-            self.assertEqual(parse_frame(f.hex()), f)
+            self.assertEqual(parse_frame(ascii_encode(f).decode()), f)
         self.assertEqual(frames[1][25:27], b'\xff\xfb')
         self.assertEqual(frames[0], frame(1, 5, 0, 0))
         s['filters']['median_window'] = 4
@@ -42,7 +42,7 @@ class Tests(unittest.TestCase):
     def test_invalid_frames(self):
         for f in [response(bytes.fromhex('010300000000')), response(bytes.fromhex('010500000001')), b'12345678']:
             with self.assertRaises(ValueError):
-                parse_frame(f.hex())
+                parse_frame(ascii_encode(f).decode())
 
     def test_transport_export_and_missing(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -63,7 +63,7 @@ class Tests(unittest.TestCase):
     def test_reject_bad_responses(self):
         request = frame(1, 3, 0, 1)
         cases = [b'', response(bytes.fromhex('018302')), response(bytes.fromhex('0203020001')),
-                 response(bytes.fromhex('01030400010002')), bytes.fromhex('01030200010000')]
+                 response(bytes.fromhex('01030400010002')), response(bytes.fromhex('0104020001'))]
         with tempfile.TemporaryDirectory() as directory:
             for reply in cases:
                 with self.subTest(reply=reply):

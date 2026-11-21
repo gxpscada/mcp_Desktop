@@ -1,4 +1,8 @@
-"""Stage-one PT100 configuration, RTU framing and reproducible exchange logs."""
+"""PT100 configuration and Modbus ASCII over USB CDC.
+
+The shared binary representation retains an internal CRC for existing validators;
+only colon/HEX/LRC/CRLF is sent on the wire.
+"""
 import copy
 import json
 import struct
@@ -30,7 +34,7 @@ def frame(address, function, start, values):
     return data + struct.pack('<H', crc16(data))
 
 
-def parse_frame(text):
+def parse_rtu_frame(text):
     data = bytes.fromhex(text.strip().lstrip(':'))
     if len(data) < 8 or len(data) > 256 or crc16(data):
         raise ValueError('Неверная длина кадра или CRC. CRC передаётся Lo, Hi.')
@@ -51,7 +55,33 @@ def parse_frame(text):
     return data
 
 
-DEFAULT_APP = dict(schema_version=1, port='COM3', baudrate=921600, bytesize=8,
+def ascii_encode(packet):
+    """Internal binary ADU -> actual ASCII wire frame. Internal CRC is not sent."""
+    body = bytes(packet[:-2])
+    lrc = (-sum(body)) & 255
+    return b':' + (body + bytes([lrc])).hex().upper().encode('ascii') + b'\r\n'
+
+
+def ascii_decode(wire):
+    if not 9 <= len(wire) <= 513 or not wire.startswith(b':') or not wire.endswith(b'\r\n'):
+        raise ValueError('ASCII: нужен кадр :HEX+LRC с завершением CRLF')
+    digits = wire[1:-2]
+    if len(digits) % 2 or any(c not in b'0123456789ABCDEFabcdef' for c in digits):
+        raise ValueError('ASCII: неверные HEX-символы или нечётная длина')
+    decoded = bytes.fromhex(digits.decode('ascii'))
+    if sum(decoded) & 255:
+        raise ValueError('ASCII: неверная LRC')
+    body = decoded[:-1]
+    return body + struct.pack('<H', crc16(body))
+
+
+def parse_frame(text):
+    # Editor uses one line per frame; actual CRLF is appended at transmission.
+    packet = ascii_decode(text.strip().encode('ascii') + b'\r\n')
+    return parse_rtu_frame(packet.hex())
+
+
+DEFAULT_APP = dict(protocol="modbus-ascii", schema_version=1, port='COM3', baudrate=921600, bytesize=8,
                    parity='N', stopbits=1, timeout=2.0, address=1)
 DEFAULT_SESSION = dict(schema_version=1, profile='pt100-v2', channel_count=3,
     filters=dict(median_enabled=True, median_window=3, average_enabled=True, average_window=4),
@@ -192,25 +222,38 @@ class Transport:
         self.port, self.timeout, self.log = port, timeout, log
 
     def transact(self, request):
-        parse_frame(request.hex())
-        self.log.write('tx', hex=request.hex(' '))
+        parse_rtu_frame(request.hex())
+        wire = ascii_encode(request)
+        self.log.write('tx', protocol='modbus-ascii', ascii=wire.decode('ascii'), hex=wire.hex(' '))
         result = bytearray()
         try:
             self.port.reset_input_buffer()
-            if self.port.write(request) != len(request):
+            if self.port.write(wire) != len(wire):
                 raise IOError('Неполная отправка')
             end = time.monotonic()+self.timeout
-            expected = None
+            last_byte = time.monotonic()
             while time.monotonic() < end:
-                result.extend(self.port.read(1))
-                if len(result) >= 2 and result[1] & 128:
-                    expected = 5
-                elif len(result) >= 3:
-                    expected = result[2]+5 if request[1] in (1, 2, 3, 4) else 8
-                if expected is not None and len(result) >= expected:
+                chunk = self.port.read(1)
+                if result and time.monotonic() - last_byte > 1.0:
+                    raise TimeoutError('ASCII: межсимвольный таймаут')
+                if not chunk:
+                    continue
+                last_byte = time.monotonic()
+                if chunk == b':':
+                    result = bytearray(chunk)
+                elif result:
+                    result.extend(chunk)
+                if len(result) > 513:
+                    raise ValueError('ASCII: превышена длина кадра')
+                if result.endswith(b'\r\n'):
                     break
-            if expected is None or len(result) != expected:
-                raise TimeoutError('Таймаут / неполный ответ')
+            received_wire = bytes(result)
+            if not result.endswith(b'\r\n'):
+                raise TimeoutError('ASCII: таймаут / неполный ответ')
+            result = ascii_decode(received_wire)
+            expected = 5 if result[1] & 128 else (result[2]+5 if request[1] in (1,2,3,4) else 8)
+            if len(result) != expected:
+                raise ValueError('Неверная длина ответа')
             if crc16(result) or result[0] != request[0]:
                 raise ValueError('CRC или адрес ответа не совпадает')
             if result[1] == request[1] | 128:
@@ -224,10 +267,10 @@ class Transport:
             elif result[2:6] != request[2:6]:
                 raise ValueError('Подтверждение записи не совпадает')
             decoded = decode(request, result)
-            self.log.write('rx', hex=result.hex(' '), function=request[1], data=decoded)
+            self.log.write('rx', protocol='modbus-ascii', ascii=received_wire.decode('ascii'), hex=received_wire.hex(' '), function=request[1], data=decoded)
             return decoded
         except Exception as exc:
-            self.log.write('error', message=str(exc), received_hex=result.hex(' '))
+            self.log.write('error', message=str(exc), received_hex=(received_wire if 'received_wire' in locals() else bytes(result)).hex(' '))
             raise
 
     def wait_command(self, address, coil):

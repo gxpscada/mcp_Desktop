@@ -8,7 +8,7 @@ from pathlib import Path
 from tkinter import ttk, filedialog, messagebox, simpledialog
 from core import (DEFAULT_APP, DEFAULT_SESSION, DEFAULT_REQUESTS, read_json, save_json,
                   validate_session, configuration_frames, request_frames, parse_frame,
-                  ExchangeLog, Transport, export_log, frame)
+                  ExchangeLog, Transport, export_log, frame, ascii_encode)
 
 ROOT = Path(__file__).resolve().parent
 
@@ -35,7 +35,7 @@ class App(tk.Tk):
         outer = ttk.Frame(self, padding=18)
         outer.pack(fill='both', expand=True)
         ttk.Label(outer, text='Температуры', style='Title.TLabel').pack(anchor='w')
-        ttk.Label(outer, text='PT100 / MAX31865   •   Настройка и одиночный обмен   •   Modbus RTU').pack(anchor='w', pady=(2, 14))
+        ttk.Label(outer, text='PT100 / MAX31865   •   Настройка и одиночный обмен   •   Modbus ASCII').pack(anchor='w', pady=(2, 14))
         connection = ttk.LabelFrame(outer, text='Подключение', padding=10)
         connection.pack(fill='x')
         self.connection_vars = {}
@@ -110,7 +110,7 @@ class App(tk.Tk):
         self.request_choice.bind('<<ComboboxSelected>>', lambda e: self.guard(self.preview_request))
         ttk.Button(request_bar, text='Reload requests.json', command=lambda: self.guard(self.reload_requests)).pack(side='left')
         ttk.Button(request_bar, text='Сформировать', command=lambda: self.guard(self.preview_request)).pack(side='left', padx=8)
-        ttk.Label(requests, text='Полные RTU-кадры HEX, включая CRC (Lo Hi). Один кадр на строку; содержимое можно менять.').pack(anchor='w', pady=(14, 6))
+        ttk.Label(requests, text='ASCII: :HEX + LRC. Один кадр на строку; CRLF добавляется при отправке.').pack(anchor='w', pady=(14, 6))
         self.request_text = tk.Text(requests, height=7, font=('Consolas', 12), wrap='word')
         self.request_text.pack(fill='x')
         ttk.Button(requests, text='Отправить кадры', command=lambda: self.guard(self.send_requests)).pack(anchor='w', pady=10)
@@ -139,7 +139,7 @@ class App(tk.Tk):
         s['stopbits'], s['timeout'] = float(s['stopbits']), float(s['timeout'])
         if not s['port'] or not 1 <= s['address'] <= 247 or not .1 <= s['timeout'] <= 60 or not 1 <= s['baudrate'] <= 4000000 or s['parity'] not in ('N', 'E', 'O') or s['stopbits'] not in (1, 2):
             raise ValueError('Проверьте параметры подключения')
-        return dict(s, bytesize=8, schema_version=1)
+        return dict(s, bytesize=8, schema_version=1, protocol="modbus-ascii")
 
     def save_settings(self):
         save_json(ROOT/'application.json', self.settings_value())
@@ -214,7 +214,7 @@ class App(tk.Tk):
             if not isinstance(request['title'], str):
                 raise ValueError('title должен быть строкой')
             for data in request_frames(request, 1):
-                parse_frame(data.hex())
+                parse_frame(ascii_encode(data).decode())
         self.requests = values
         self.request_choice['values'] = [r['title'] for r in values]
         self.request_choice.current(0)
@@ -224,7 +224,7 @@ class App(tk.Tk):
         address = self.settings['address'] if self.port else self.settings_value()['address']
         frames = request_frames(self.requests[self.request_choice.current()], address)
         self.request_text.delete('1.0', 'end')
-        self.request_text.insert('1.0', '\n'.join(data.hex(' ').upper() for data in frames))
+        self.request_text.insert('1.0', '\n'.join(ascii_encode(data).decode().rstrip('\r\n') for data in frames))
 
     def connect(self):
         def action():
@@ -268,7 +268,7 @@ class App(tk.Tk):
         threading.Thread(target=worker, daemon=True).start()
 
     def exchange(self, transport, request):
-        self.events.put(('text', 'TX  '+request.hex(' ').upper()))
+        self.events.put(('text', 'TX  '+ascii_encode(request).decode().rstrip('\r\n')))
         result = transport.transact(request)
         self.events.put(('text', 'RX  '+json.dumps(result, ensure_ascii=False)))
         return result
