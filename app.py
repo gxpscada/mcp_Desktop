@@ -22,6 +22,7 @@ class App(tk.Tk):
         self.port = None
         self.log = None
         self.busy = False
+        self.device_buttons = []
         self.events = queue.Queue()
         self.session = copy.deepcopy(DEFAULT_SESSION)
         self.session_path = ROOT/'sessions/session01.json'
@@ -66,7 +67,10 @@ class App(tk.Tk):
         bar.pack(fill='x')
         for text, action in [('Открыть JSON', self.load_session), ('Сохранить как…', self.save_session),
                              ('Добавить поле', self.add_field), ('Отправить конфигурацию', self.configure_device)]:
-            ttk.Button(bar, text=text, command=lambda fn=action: self.guard(fn)).pack(side='left', padx=(0, 6))
+            button = ttk.Button(bar, text=text, command=lambda fn=action: self.guard(fn))
+            button.pack(side='left', padx=(0, 6))
+            if action == self.configure_device:
+                self.device_buttons.append(button)
         self.session_label = tk.StringVar(value=str(self.session_path.name))
         ttk.Label(config, textvariable=self.session_label).pack(anchor='w', pady=8)
         options = ttk.Frame(config)
@@ -111,7 +115,9 @@ class App(tk.Tk):
         ttk.Label(requests, text='ASCII: :HEX + LRC. Один кадр на строку; CRLF добавляется при отправке.').pack(anchor='w', pady=(14, 6))
         self.request_text = tk.Text(requests, height=7, font=('Consolas', 12), wrap='word')
         self.request_text.pack(fill='x')
-        ttk.Button(requests, text='Отправить кадры', command=lambda: self.guard(self.send_requests)).pack(anchor='w', pady=10)
+        send_button = ttk.Button(requests, text='Отправить кадры', command=lambda: self.guard(self.send_requests))
+        send_button.pack(anchor='w', pady=10)
+        self.device_buttons.append(send_button)
         ttk.Label(requests, text='Ответы и события').pack(anchor='w')
         self.output = tk.Text(requests, height=12, font=('Consolas', 10), state='disabled', wrap='word')
         self.output.pack(fill='both', expand=True)
@@ -122,7 +128,14 @@ class App(tk.Tk):
         self.reload_requests()
         if self.session_path.exists():
             self.show_session(validate_session(read_json(self.session_path)))
+        self.update_controls()
         self.after(80, self.poll_events)
+
+    def update_controls(self):
+        connected = self.port is not None and self.port.is_open
+        for button in self.device_buttons:
+            button.state(["!disabled" if connected and not self.busy else "disabled"])
+        self.connect_button.state(["disabled" if self.busy else "!disabled"])
 
     def guard(self, fn):
         try:
@@ -236,6 +249,7 @@ class App(tk.Tk):
                 self.port = None
                 self.connect_button.configure(text='Подключить')
                 self.status.set('Отключено')
+                self.update_controls()
                 return
             try:
                 import serial
@@ -253,11 +267,13 @@ class App(tk.Tk):
             self.connect_button.configure(text='Отключить')
             self.status.set(f"Подключено: {s['port']} • адрес {s['address']} • {log.path.name}")
         self.guard(action)
+        self.update_controls()
 
     def run_job(self, fn):
-        if self.busy or self.port is None:
+        if self.busy or self.port is None or not self.port.is_open:
             raise ValueError('Подключите прибор и дождитесь завершения текущей операции')
         self.busy = True
+        self.update_controls()
         self.status.set('Обмен с прибором…')
         transport = Transport(self.port, self.settings['timeout'], self.log)
         def worker():
@@ -265,7 +281,8 @@ class App(tk.Tk):
                 fn(transport)
                 self.events.put(('done', 'Операция завершена'))
             except Exception as exc:
-                self.events.put(('error', str(exc)))
+                from serial import SerialException
+                self.events.put(('disconnected' if isinstance(exc, (SerialException, OSError)) else 'error', str(exc)))
         threading.Thread(target=worker, daemon=True).start()
 
     def exchange(self, transport, request):
@@ -332,11 +349,20 @@ class App(tk.Tk):
             self.output.insert('end', text+'\n')
             self.output.see('end')
             self.output.configure(state='disabled')
-            if kind in ('done', 'error'):
+            if kind in ('done', 'error', 'disconnected'):
                 self.busy = False
                 self.status.set(text)
-                if kind == 'error':
+                if kind == 'disconnected':
+                    try:
+                        self.port.close()
+                    except OSError:
+                        pass
+                    self.port = None
+                    self.connect_button.configure(text='Подключить')
+                self.update_controls()
+                if kind in ('error', 'disconnected'):
                     messagebox.showerror('Обмен не завершён', text, parent=self)
+        self.update_controls()
         self.after(80, self.poll_events)
 
     def export(self):
