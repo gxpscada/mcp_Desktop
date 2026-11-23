@@ -1,6 +1,11 @@
-"""Stage-one PT100 configuration, RTU framing and reproducible exchange logs."""
+"""PT100 configuration and Modbus ASCII over USB CDC.
+
+The shared binary representation retains an internal CRC for existing validators;
+only colon/HEX/LRC/CRLF is sent on the wire.
+"""
 import copy
 import json
+import math
 import struct
 import time
 from datetime import datetime, timezone
@@ -30,7 +35,7 @@ def frame(address, function, start, values):
     return data + struct.pack('<H', crc16(data))
 
 
-def parse_frame(text):
+def parse_rtu_frame(text):
     data = bytes.fromhex(text.strip().lstrip(':'))
     if len(data) < 8 or len(data) > 256 or crc16(data):
         raise ValueError('Неверная длина кадра или CRC. CRC передаётся Lo, Hi.')
@@ -51,7 +56,33 @@ def parse_frame(text):
     return data
 
 
-DEFAULT_APP = dict(schema_version=1, port='COM3', baudrate=921600, bytesize=8,
+def ascii_encode(packet):
+    """Internal binary ADU -> actual ASCII wire frame. Internal CRC is not sent."""
+    body = bytes(packet[:-2])
+    lrc = (-sum(body)) & 255
+    return b':' + (body + bytes([lrc])).hex().upper().encode('ascii') + b'\r\n'
+
+
+def ascii_decode(wire):
+    if not 9 <= len(wire) <= 513 or not wire.startswith(b':') or not wire.endswith(b'\r\n'):
+        raise ValueError('ASCII: нужен кадр :HEX+LRC с завершением CRLF')
+    digits = wire[1:-2]
+    if len(digits) % 2 or any(c not in b'0123456789ABCDEFabcdef' for c in digits):
+        raise ValueError('ASCII: неверные HEX-символы или нечётная длина')
+    decoded = bytes.fromhex(digits.decode('ascii'))
+    if sum(decoded) & 255:
+        raise ValueError('ASCII: неверная LRC')
+    body = decoded[:-1]
+    return body + struct.pack('<H', crc16(body))
+
+
+def parse_frame(text):
+    # Editor uses one line per frame; actual CRLF is appended at transmission.
+    packet = ascii_decode(text.strip().encode('ascii') + b'\r\n')
+    return parse_rtu_frame(packet.hex())
+
+
+DEFAULT_APP = dict(protocol="modbus-ascii", schema_version=1, port='COM3', baudrate=921600, bytesize=8,
                    parity='N', stopbits=1, timeout=2.0, address=1)
 DEFAULT_SESSION = dict(schema_version=1, profile='pt100-v2', channel_count=3,
     filters=dict(median_enabled=True, median_window=3, average_enabled=True, average_window=4),
@@ -61,6 +92,10 @@ DEFAULT_REQUESTS = [
     dict(title='Все T + RTC + ADC', function=4, start=0x15, count=19),
     dict(title='Температуры T0–T7', function=4, start=0x15, count=8),
     dict(title='АЦП T0–T7', function=4, start=0x20, count=8),
+    dict(title='Программные статусы T0–T7', function=4, start=0x60, count=8),
+    dict(title='АЦП Q1 (полуотсчёты) T0–T7', function=4, start=0x68, count=8),
+    dict(title='Температуры float32 T0–T7', function=4, start=0x40, count=16),
+    dict(title='Маска выбранных каналов', function=3, start=0x1d, count=1),
     dict(title='Статусы T0–T7', function=4, start=9, count=8),
     dict(title='Настройки прибора', function=3, start=0, count=27),
     dict(title='Флаги фильтров и калибровки', function=1, start=6, count=3),
@@ -90,6 +125,10 @@ def validate_session(s):
     if s['schema_version'] != 1 or s['profile'] != 'pt100-v2':
         raise ValueError('Неизвестная версия или профиль сеанса')
     integer(s['channel_count'], 1, 8)
+    mask = s.get('channel_mask', (1 << s['channel_count']) - 1)
+    integer(mask, 1, 255)
+    if mask.bit_length() != s['channel_count']:
+        raise ValueError('Граница каналов должна соответствовать старшему выбранному каналу')
     if len(s['channels']) != 8:
         raise ValueError('Требуются настройки всех восьми регистров каналов')
     for c in s['channels']:
@@ -117,6 +156,7 @@ def configuration_frames(s, address):
     regs += [c['b'] & 65535 for c in channels] + [c['k_x100'] for c in channels]
     regs += [s['filters']['average_window'], s['filters']['median_window']]
     result = [frame(address, 5, 0, 0), frame(address, 16, 0, regs)]
+    result.append(frame(address, 6, 0x1d, s.get('channel_mask', (1 << s['channel_count']) - 1)))
     for index, enabled in enumerate((s['filters']['median_enabled'], s['filters']['average_enabled'], s['calibration_enabled']), 6):
         result.append(frame(address, 5, index, 65280 if enabled else 0))
     return result
@@ -137,7 +177,7 @@ def decode(request, response):
         words = struct.unpack('>'+'H'*(response[2]//2), response[3:-2])
         result = {}
         for a, value in enumerate(words, start):
-            key = f'FC{fc:02X}_{a:04X}'
+            key = f'{a:04X}'
             if fc == 4 and 0x15 <= a <= 0x1c:
                 key = f'T{a-0x15}_C'
                 value = None if value == 0x8000 else (value if value < 32768 else value-65536)/100
@@ -145,12 +185,35 @@ def decode(request, response):
                 key = f'ADC{a-0x20}'
                 value = None if value == 65535 else value
             result[key] = value
+        if fc == 4:
+            for base, label in ((0x40, 'T'), (0x50, 'R')):
+                for i in range(8):
+                    a = base + 2*i
+                    if start <= a and a+1 < start+len(words):
+                        value = struct.unpack('<f', struct.pack('<HH', words[a-start], words[a+1-start]))[0]
+                        result[f'{label}{i}_' + ('C_float' if label == 'T' else 'ohm')] = value if math.isfinite(value) else None
         if fc == 4 and start <= 30 and start+len(words) > 31:
             result['rtc_utc_seconds'] = words[30-start] | words[31-start] << 16
         return result
     if fc in (1, 2):
         return {'bits_hex': response[3:-2].hex()}
     return {'acknowledged': True}
+
+
+def register_view(request, response):
+    fc = request[1]
+    space = {1: 'COILS', 2: 'DI', 3: 'HR', 4: 'IR', 5: 'COILS', 6: 'HR', 16: 'HR'}[fc]
+    start = int.from_bytes(request[2:4], 'big')
+    if fc in (3, 4):
+        values = struct.unpack('>' + 'H' * (response[2] // 2), response[3:-2])
+    elif fc in (1, 2):
+        count = int.from_bytes(request[4:6], 'big')
+        values = [(response[3 + i // 8] >> (i % 8)) & 1 for i in range(count)]
+    else:
+        return space, {'acknowledged': True}
+    width = 1 if fc in (1, 2) else 16
+    return space, {f'{start+i:04X}': {'HEX': f'0x{v:04X}', 'BIN': format(v, f'0{width}b'), 'DEC': v}
+                   for i, v in enumerate(values)}
 
 
 class ExchangeLog:
@@ -190,27 +253,45 @@ def export_log(source, destination):
 class Transport:
     def __init__(self, port, timeout, log):
         self.port, self.timeout, self.log = port, timeout, log
+        self.last_ascii = ''
+        self.last_registers = {}
+        self.last_space = ''
 
     def transact(self, request):
-        parse_frame(request.hex())
-        self.log.write('tx', hex=request.hex(' '))
+        self.last_ascii = ''
+        parse_rtu_frame(request.hex())
+        wire = ascii_encode(request)
+        self.log.write('tx', protocol='modbus-ascii', ascii=wire.decode('ascii'), hex=wire.hex(' '))
         result = bytearray()
         try:
             self.port.reset_input_buffer()
-            if self.port.write(request) != len(request):
+            if self.port.write(wire) != len(wire):
                 raise IOError('Неполная отправка')
             end = time.monotonic()+self.timeout
-            expected = None
+            last_byte = time.monotonic()
             while time.monotonic() < end:
-                result.extend(self.port.read(1))
-                if len(result) >= 2 and result[1] & 128:
-                    expected = 5
-                elif len(result) >= 3:
-                    expected = result[2]+5 if request[1] in (1, 2, 3, 4) else 8
-                if expected is not None and len(result) >= expected:
+                chunk = self.port.read(1)
+                if result and time.monotonic() - last_byte > 1.0:
+                    raise TimeoutError('ASCII: межсимвольный таймаут')
+                if not chunk:
+                    continue
+                last_byte = time.monotonic()
+                if chunk == b':':
+                    result = bytearray(chunk)
+                elif result:
+                    result.extend(chunk)
+                if len(result) > 513:
+                    raise ValueError('ASCII: превышена длина кадра')
+                if result.endswith(b'\r\n'):
                     break
-            if expected is None or len(result) != expected:
-                raise TimeoutError('Таймаут / неполный ответ')
+            received_wire = bytes(result)
+            if not result.endswith(b'\r\n'):
+                raise TimeoutError('ASCII: таймаут / неполный ответ')
+            self.last_ascii = received_wire.decode('ascii', errors='replace')
+            result = ascii_decode(received_wire)
+            expected = 5 if result[1] & 128 else (result[2]+5 if request[1] in (1,2,3,4) else 8)
+            if len(result) != expected:
+                raise ValueError('Неверная длина ответа')
             if crc16(result) or result[0] != request[0]:
                 raise ValueError('CRC или адрес ответа не совпадает')
             if result[1] == request[1] | 128:
@@ -224,10 +305,12 @@ class Transport:
             elif result[2:6] != request[2:6]:
                 raise ValueError('Подтверждение записи не совпадает')
             decoded = decode(request, result)
-            self.log.write('rx', hex=result.hex(' '), function=request[1], data=decoded)
+            self.last_ascii = received_wire.decode('ascii')
+            self.last_space, self.last_registers = register_view(request, result)
+            self.log.write('rx', protocol='modbus-ascii', ascii=received_wire.decode('ascii'), hex=received_wire.hex(' '), function=request[1], space=self.last_space, registers=self.last_registers, data=decoded)
             return decoded
         except Exception as exc:
-            self.log.write('error', message=str(exc), received_hex=result.hex(' '))
+            self.log.write('error', message=str(exc), received_hex=(received_wire if 'received_wire' in locals() else bytes(result)).hex(' '))
             raise
 
     def wait_command(self, address, coil):
@@ -235,7 +318,7 @@ class Transport:
         while time.monotonic() < end:
             reply = self.transact(frame(address, 1, coil, 1))
             if not int(reply['bits_hex'], 16) & 1:
-                error = self.transact(frame(address, 4, 29, 1))['FC04_001D']
+                error = self.transact(frame(address, 4, 29, 1))['001D']
                 if error:
                     raise RuntimeError(f'Ошибка выполнения команды: {error}')
                 return

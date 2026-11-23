@@ -8,7 +8,7 @@ from pathlib import Path
 from tkinter import ttk, filedialog, messagebox, simpledialog
 from core import (DEFAULT_APP, DEFAULT_SESSION, DEFAULT_REQUESTS, read_json, save_json,
                   validate_session, configuration_frames, request_frames, parse_frame,
-                  ExchangeLog, Transport, export_log, frame)
+                  ExchangeLog, Transport, export_log, frame, ascii_encode)
 
 ROOT = Path(__file__).resolve().parent
 
@@ -35,7 +35,7 @@ class App(tk.Tk):
         outer = ttk.Frame(self, padding=18)
         outer.pack(fill='both', expand=True)
         ttk.Label(outer, text='Температуры', style='Title.TLabel').pack(anchor='w')
-        ttk.Label(outer, text='PT100 / MAX31865   •   Настройка и одиночный обмен   •   Modbus RTU').pack(anchor='w', pady=(2, 14))
+        ttk.Label(outer, text='PT100 / MAX31865   •   Настройка и одиночный обмен   •   Modbus ASCII').pack(anchor='w', pady=(2, 14))
         connection = ttk.LabelFrame(outer, text='Подключение', padding=10)
         connection.pack(fill='x')
         self.connection_vars = {}
@@ -71,9 +71,7 @@ class App(tk.Tk):
         ttk.Label(config, textvariable=self.session_label).pack(anchor='w', pady=8)
         options = ttk.Frame(config)
         options.pack(fill='x')
-        self.count = tk.StringVar(value='3')
-        ttk.Label(options, text='Активных каналов').pack(side='left')
-        ttk.Spinbox(options, from_=1, to=8, width=4, textvariable=self.count).pack(side='left', padx=8)
+        self.channel_enabled = [tk.BooleanVar(value=i < self.session['channel_count']) for i in range(8)]
         self.median = tk.BooleanVar(value=True)
         self.average = tk.BooleanVar(value=True)
         self.calibration = tk.BooleanVar(value=True)
@@ -89,7 +87,7 @@ class App(tk.Tk):
             ttk.Label(table, text=label).grid(row=0, column=col, sticky='w', padx=10, pady=3)
         self.channels = []
         for i in range(8):
-            ttk.Label(table, text=f'T{i}').grid(row=i+1, column=0, padx=10)
+            ttk.Checkbutton(table, text=f'T{i}', variable=self.channel_enabled[i]).grid(row=i+1, column=0, padx=10)
             row = {}
             for col, key in enumerate(('rref_x10', 'b', 'k_x100'), 1):
                 row[key] = tk.StringVar(value=str(self.session['channels'][i][key]))
@@ -110,7 +108,7 @@ class App(tk.Tk):
         self.request_choice.bind('<<ComboboxSelected>>', lambda e: self.guard(self.preview_request))
         ttk.Button(request_bar, text='Reload requests.json', command=lambda: self.guard(self.reload_requests)).pack(side='left')
         ttk.Button(request_bar, text='Сформировать', command=lambda: self.guard(self.preview_request)).pack(side='left', padx=8)
-        ttk.Label(requests, text='Полные RTU-кадры HEX, включая CRC (Lo Hi). Один кадр на строку; содержимое можно менять.').pack(anchor='w', pady=(14, 6))
+        ttk.Label(requests, text='ASCII: :HEX + LRC. Один кадр на строку; CRLF добавляется при отправке.').pack(anchor='w', pady=(14, 6))
         self.request_text = tk.Text(requests, height=7, font=('Consolas', 12), wrap='word')
         self.request_text.pack(fill='x')
         ttk.Button(requests, text='Отправить кадры', command=lambda: self.guard(self.send_requests)).pack(anchor='w', pady=10)
@@ -139,7 +137,7 @@ class App(tk.Tk):
         s['stopbits'], s['timeout'] = float(s['stopbits']), float(s['timeout'])
         if not s['port'] or not 1 <= s['address'] <= 247 or not .1 <= s['timeout'] <= 60 or not 1 <= s['baudrate'] <= 4000000 or s['parity'] not in ('N', 'E', 'O') or s['stopbits'] not in (1, 2):
             raise ValueError('Проверьте параметры подключения')
-        return dict(s, bytesize=8, schema_version=1)
+        return dict(s, bytesize=8, schema_version=1, protocol="modbus-ascii")
 
     def save_settings(self):
         save_json(ROOT/'application.json', self.settings_value())
@@ -153,7 +151,8 @@ class App(tk.Tk):
 
     def session_value(self):
         s = copy.deepcopy(self.session)
-        s.update(channel_count=int(self.count.get()), calibration_enabled=self.calibration.get(),
+        mask = sum(1 << i for i, enabled in enumerate(self.channel_enabled) if enabled.get())
+        s.update(channel_count=mask.bit_length(), channel_mask=mask, calibration_enabled=self.calibration.get(),
                  channels=[{key: int(var.get()) for key, var in c.items()} for c in self.channels],
                  metadata=json.loads(self.metadata.get('1.0', 'end')))
         s['filters'].update(median_enabled=self.median.get(), average_enabled=self.average.get(),
@@ -162,7 +161,9 @@ class App(tk.Tk):
 
     def show_session(self, s):
         self.session = copy.deepcopy(s)
-        self.count.set(str(s['channel_count']))
+        mask = s.get('channel_mask', (1 << s['channel_count']) - 1)
+        for i, enabled in enumerate(self.channel_enabled):
+            enabled.set(bool(mask & (1 << i)))
         self.calibration.set(s['calibration_enabled'])
         for var, key in [(self.median, 'median_enabled'), (self.average, 'average_enabled'), (self.median_window, 'median_window'), (self.average_window, 'average_window')]:
             var.set(s['filters'][key])
@@ -214,7 +215,7 @@ class App(tk.Tk):
             if not isinstance(request['title'], str):
                 raise ValueError('title должен быть строкой')
             for data in request_frames(request, 1):
-                parse_frame(data.hex())
+                parse_frame(ascii_encode(data).decode())
         self.requests = values
         self.request_choice['values'] = [r['title'] for r in values]
         self.request_choice.current(0)
@@ -224,7 +225,7 @@ class App(tk.Tk):
         address = self.settings['address'] if self.port else self.settings_value()['address']
         frames = request_frames(self.requests[self.request_choice.current()], address)
         self.request_text.delete('1.0', 'end')
-        self.request_text.insert('1.0', '\n'.join(data.hex(' ').upper() for data in frames))
+        self.request_text.insert('1.0', '\n'.join(ascii_encode(data).decode().rstrip('\r\n') for data in frames))
 
     def connect(self):
         def action():
@@ -268,9 +269,17 @@ class App(tk.Tk):
         threading.Thread(target=worker, daemon=True).start()
 
     def exchange(self, transport, request):
-        self.events.put(('text', 'TX  '+request.hex(' ').upper()))
-        result = transport.transact(request)
-        self.events.put(('text', 'RX  '+json.dumps(result, ensure_ascii=False)))
+        self.events.put(('text', 'TX  '+ascii_encode(request).decode().rstrip('\r\n')))
+        try:
+            result = transport.transact(request)
+        finally:
+            if transport.last_ascii:
+                self.events.put(('text', 'RX ASCII  '+transport.last_ascii.rstrip('\r\n')))
+        self.events.put(('text', transport.last_space+' '+json.dumps(transport.last_registers, ensure_ascii=False)))
+        if request[1] == 4:
+            physical = {k: v for k, v in result.items() if k.startswith(('T', 'R', 'ADC', 'rtc'))}
+            if physical:
+                self.events.put(('text', 'Значения '+json.dumps(physical, ensure_ascii=False)))
         return result
 
     def send_requests(self):
@@ -300,6 +309,9 @@ class App(tk.Tk):
                 expected = frames[1][7:-2]
                 if list(actual.values()) != [int.from_bytes(expected[i:i+2], 'big') for i in range(0, len(expected), 2)]:
                     raise ValueError('Проверка настроек чтением не прошла')
+                mask = t.transact(frame(address, 3, 0x1d, 1))['001D']
+                if mask != s['channel_mask']:
+                    raise ValueError('Проверка выбранных каналов не прошла')
                 bits = int(t.transact(frame(address, 1, 6, 3))['bits_hex'], 16) & 7
                 wanted = int(s['filters']['median_enabled']) | int(s['filters']['average_enabled']) << 1 | int(s['calibration_enabled']) << 2
                 if bits != wanted:

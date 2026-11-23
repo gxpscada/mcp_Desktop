@@ -58,9 +58,27 @@
     "action": "rtc"
   },
   {
-    "title": "Диагностика MAX31865 T0 (новая прошивка)",
+    "title": "Программные статусы T0–T7",
+    "function": 4,
+    "start": 96,
+    "count": 8
+  },
+  {
+    "title": "АЦП Q1 (полуотсчёты) T0–T7",
+    "function": 4,
+    "start": 104,
+    "count": 8
+  },
+  {
+    "title": "Маска выбранных каналов",
+    "function": 3,
+    "start": 29,
+    "count": 1
+  },
+  {
+    "title": "Температуры float32 T0–T7",
     "function": 4,
     "start": 64,
-    "count": 9
+    "count": 16
   }
 ]
