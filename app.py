@@ -16,7 +16,7 @@ ROOT = Path(__file__).resolve().parent
 class App(tk.Tk):
     def __init__(self):
         super().__init__()
-        self.title('Температуры • PT100 | Этап 1')
+        self.title('Температуры • PT100 | mcp_Desktop • блокировка COM')
         self.geometry('1140x850')
         self.minsize(960, 740)
         self.port = None
@@ -128,13 +128,21 @@ class App(tk.Tk):
         self.reload_requests()
         if self.session_path.exists():
             self.show_session(validate_session(read_json(self.session_path)))
+        self.device_controls = []
+        def collect(parent):
+            for widget in parent.winfo_children():
+                if isinstance(widget, (ttk.Button, ttk.Checkbutton, ttk.Entry, ttk.Combobox, ttk.Spinbox, tk.Text)) and widget is not self.output:
+                    self.device_controls.append((widget, str(widget.cget('state'))))
+                collect(widget)
+        collect(config)
+        collect(requests)
         self.update_controls()
         self.after(80, self.poll_events)
 
     def update_controls(self):
         connected = self.port is not None and self.port.is_open
-        for button in self.device_buttons:
-            button.state(["!disabled" if connected and not self.busy else "disabled"])
+        for widget, initial_state in self.device_controls:
+            widget.configure(state=initial_state if connected and not self.busy else "disabled")
         self.connect_button.state(["disabled" if self.busy else "!disabled"])
 
     def guard(self, fn):
