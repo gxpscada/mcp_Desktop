@@ -3,6 +3,8 @@ import copy
 import json
 import queue
 import threading
+import time
+from plot import TemperaturePlot
 import tkinter as tk
 from pathlib import Path
 from tkinter import ttk, filedialog, messagebox, simpledialog
@@ -24,6 +26,7 @@ class App(tk.Tk):
         self.busy = False
         self.streaming = False
         self.stream_stop = threading.Event()
+        self.after_stream_job = None
         self.pending_requests = []
         self.device_buttons = []
         self.events = queue.Queue()
@@ -66,6 +69,8 @@ class App(tk.Tk):
         requests = ttk.Frame(tabs, padding=12)
         tabs.add(config, text='  Сеанс и калибровка  ')
         tabs.add(requests, text='  Запросы и ответы  ')
+        self.plot = TemperaturePlot(tabs)
+        tabs.add(self.plot, text='  График температур  ')
         bar = ttk.Frame(config)
         bar.pack(fill='x')
         for text, action in [('Открыть JSON', self.load_session), ('Сохранить как…', self.save_session),
@@ -154,7 +159,7 @@ class App(tk.Tk):
             widget.configure(state=initial_state if connected and not self.busy else "disabled")
         self.connect_button.state(["disabled" if self.busy else "!disabled"])
         if self.streaming:
-            for widget, state in self.request_controls:
+            for widget, state in self.device_controls:
                 if widget is not self.start_stream_button:
                     widget.configure(state=state)
         self.stop_stream_button.configure(state="normal" if self.streaming else "disabled")
@@ -329,21 +334,27 @@ class App(tk.Tk):
             raise ValueError('Подключите прибор и дождитесь завершения операции')
         request = requests[0]
         self.pending_requests = []
+        self.after_stream_job = None
+        self.plot.clear()
         self.stream_stop.clear()
         self.streaming = True
         def job(t):
             try:
                 self.exchange(t, frame(request[0], 5, 9, 65280))
-                self.exchange(t, request)
+                first = self.exchange(t, request)
+                self.events.put(('plot', (time.monotonic(), first)))
                 while not self.stream_stop.is_set():
                     result = t.transact(request, send_request=False, stop=self.stream_stop)
                     if result is not None:
+                        self.events.put(('plot', (time.monotonic(), result)))
                         self.events.put(('text', 'RX ASCII  '+t.last_ascii.rstrip('\r\n')))
                         self.events.put(('text', t.last_space+' '+json.dumps(t.last_registers, ensure_ascii=False)))
                         self.events.put(('text', 'Значения '+json.dumps(result, ensure_ascii=False)))
             finally:
                 # FC05 отличается от повторяемого FC01–04: пропускаем остатки потока до ACK.
                 t.transact(frame(request[0], 5, 9, 0), ignore_functions=(1, 2, 3, 4))
+            if self.after_stream_job is not None:
+                self.after_stream_job(t)
             for pending in self.pending_requests:
                 self.exchange(t, pending)
         self.run_job(job)
@@ -393,11 +404,24 @@ class App(tk.Tk):
             except Exception as exc:
                 t.log.write('configuration_failed', message=str(exc), state='Possibly partially applied; read device settings')
                 raise RuntimeError(f'{exc}. Конфигурация могла примениться частично; прочитайте настройки прибора.') from exc
-        self.run_job(job)
+        if self.streaming:
+            self.pending_requests = []
+            self.after_stream_job = job
+            self.streaming = False
+            self.stream_stop.set()
+            self.status.set('Остановка потока → STOP → отправка конфигурации…')
+            self.update_controls()
+        else:
+            self.run_job(job)
 
     def poll_events(self):
-        while not self.events.empty():
+        for _ in range(200):
+            if self.events.empty():
+                break
             kind, text = self.events.get_nowait()
+            if kind == 'plot':
+                self.plot.add(*text)
+                continue
             self.output.configure(state='normal')
             self.output.insert('end', text+'\n')
             if int(self.output.index('end-1c').split('.')[0]) > 1000:
@@ -418,6 +442,8 @@ class App(tk.Tk):
                 self.update_controls()
                 if kind in ('error', 'disconnected'):
                     messagebox.showerror('Обмен не завершён', text, parent=self)
+        if self.plot.dirty:
+            self.plot.redraw()
         self.update_controls()
         self.after(80, self.poll_events)
 
