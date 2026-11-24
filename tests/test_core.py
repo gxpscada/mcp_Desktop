@@ -69,6 +69,33 @@ class Tests(unittest.TestCase):
         self.assertEqual(data['T0_C_float'], 850.0)
         self.assertIsNone(data['T1_C_float'])
 
+    def test_stream_receive_without_retransmit(self):
+        class StreamPort(Port):
+            def reset_input_buffer(self):
+                raise AssertionError('Must not discard streamed data')
+            def write(self, data):
+                raise AssertionError('Must not repeat the request')
+        with tempfile.TemporaryDirectory() as directory:
+            log = ExchangeLog(directory, DEFAULT_SESSION, DEFAULT_APP)
+            t = Transport(StreamPort(response(bytes.fromhex('010402007B'))), .01, log)
+            self.assertEqual(t.transact(frame(1, 4, 9, 1), send_request=False)['0009'], 123)
+
+    def test_stream_stop_skips_inflight_read(self):
+        with tempfile.TemporaryDirectory() as directory:
+            log = ExchangeLog(directory, DEFAULT_SESSION, DEFAULT_APP)
+            stop = frame(1, 5, 9, 0)
+            p = Port(b'')
+            p.reply = ascii_encode(response(bytes.fromhex('010402007B'))) + ascii_encode(stop)
+            self.assertEqual(Transport(p, .01, log).transact(stop, ignore_functions=(4,)), {'acknowledged': True})
+
+    def test_stream_cancel_while_idle(self):
+        import threading
+        stop = threading.Event(); stop.set()
+        with tempfile.TemporaryDirectory() as directory:
+            log = ExchangeLog(directory, DEFAULT_SESSION, DEFAULT_APP)
+            t = Transport(Port(b''), .01, log)
+            self.assertIsNone(t.transact(frame(1, 4, 9, 1), send_request=False, stop=stop))
+
     def test_invalid_frames(self):
         for f in [response(bytes.fromhex('010300000000')), response(bytes.fromhex('010500000001')), b'12345678']:
             with self.assertRaises(ValueError):

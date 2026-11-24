@@ -257,19 +257,23 @@ class Transport:
         self.last_registers = {}
         self.last_space = ''
 
-    def transact(self, request):
+    def transact(self, request, send_request=True, stop=None, ignore_functions=()):
         self.last_ascii = ''
         parse_rtu_frame(request.hex())
         wire = ascii_encode(request)
-        self.log.write('tx', protocol='modbus-ascii', ascii=wire.decode('ascii'), hex=wire.hex(' '))
+        if send_request:
+            self.log.write('tx', protocol='modbus-ascii', ascii=wire.decode('ascii'), hex=wire.hex(' '))
         result = bytearray()
         try:
-            self.port.reset_input_buffer()
-            if self.port.write(wire) != len(wire):
-                raise IOError('Неполная отправка')
+            if send_request:
+                self.port.reset_input_buffer()
+                if self.port.write(wire) != len(wire):
+                    raise IOError('Неполная отправка')
             end = time.monotonic()+self.timeout
             last_byte = time.monotonic()
-            while time.monotonic() < end:
+            while time.monotonic() < end or (stop is not None and not result):
+                if stop is not None and stop.is_set():
+                    return None
                 chunk = self.port.read(1)
                 if result and time.monotonic() - last_byte > 1.0:
                     raise TimeoutError('ASCII: межсимвольный таймаут')
@@ -283,6 +287,9 @@ class Transport:
                 if len(result) > 513:
                     raise ValueError('ASCII: превышена длина кадра')
                 if result.endswith(b'\r\n'):
+                    if ignore_functions and ascii_decode(bytes(result))[1] in ignore_functions:
+                        result = bytearray()
+                        continue
                     break
             received_wire = bytes(result)
             if not result.endswith(b'\r\n'):

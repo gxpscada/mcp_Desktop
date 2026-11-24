@@ -22,6 +22,9 @@ class App(tk.Tk):
         self.port = None
         self.log = None
         self.busy = False
+        self.streaming = False
+        self.stream_stop = threading.Event()
+        self.pending_requests = []
         self.device_buttons = []
         self.events = queue.Queue()
         self.session = copy.deepcopy(DEFAULT_SESSION)
@@ -118,6 +121,10 @@ class App(tk.Tk):
         send_button = ttk.Button(requests, text='Отправить кадры', command=lambda: self.guard(self.send_requests))
         send_button.pack(anchor='w', pady=10)
         self.device_buttons.append(send_button)
+        self.start_stream_button = ttk.Button(requests, text='Непрерывное чтение', command=lambda: self.guard(self.start_stream))
+        self.start_stream_button.pack(anchor='w')
+        self.stop_stream_button = ttk.Button(requests, text='Остановить поток', command=self.stream_stop.set)
+        self.stop_stream_button.pack(anchor='w')
         ttk.Label(requests, text='Ответы и события').pack(anchor='w')
         self.output = tk.Text(requests, height=12, font=('Consolas', 10), state='disabled', wrap='word')
         self.output.pack(fill='both', expand=True)
@@ -135,7 +142,9 @@ class App(tk.Tk):
                     self.device_controls.append((widget, str(widget.cget('state'))))
                 collect(widget)
         collect(config)
+        config_count = len(self.device_controls)
         collect(requests)
+        self.request_controls = self.device_controls[config_count:]
         self.update_controls()
         self.after(80, self.poll_events)
 
@@ -144,6 +153,11 @@ class App(tk.Tk):
         for widget, initial_state in self.device_controls:
             widget.configure(state=initial_state if connected and not self.busy else "disabled")
         self.connect_button.state(["disabled" if self.busy else "!disabled"])
+        if self.streaming:
+            for widget, state in self.request_controls:
+                if widget is not self.start_stream_button:
+                    widget.configure(state=state)
+        self.stop_stream_button.configure(state="normal" if self.streaming else "disabled")
 
     def guard(self, fn):
         try:
@@ -307,10 +321,41 @@ class App(tk.Tk):
                 self.events.put(('text', 'Значения '+json.dumps(physical, ensure_ascii=False)))
         return result
 
+    def start_stream(self):
+        requests = [parse_frame(line) for line in self.request_text.get('1.0', 'end').splitlines() if line.strip()]
+        if len(requests) != 1 or requests[0][1] not in (1, 2, 3, 4):
+            raise ValueError('Для потока нужен один запрос чтения FC01–FC04')
+        if self.busy or self.port is None or not self.port.is_open:
+            raise ValueError('Подключите прибор и дождитесь завершения операции')
+        request = requests[0]
+        self.pending_requests = []
+        self.stream_stop.clear()
+        self.streaming = True
+        def job(t):
+            try:
+                self.exchange(t, frame(request[0], 5, 9, 65280))
+                self.exchange(t, request)
+                while not self.stream_stop.is_set():
+                    result = t.transact(request, send_request=False, stop=self.stream_stop)
+                    if result is not None:
+                        self.events.put(('text', 'RX ASCII  '+t.last_ascii.rstrip('\r\n')))
+                        self.events.put(('text', t.last_space+' '+json.dumps(t.last_registers, ensure_ascii=False)))
+                        self.events.put(('text', 'Значения '+json.dumps(result, ensure_ascii=False)))
+            finally:
+                # FC05 отличается от повторяемого FC01–04: пропускаем остатки потока до ACK.
+                t.transact(frame(request[0], 5, 9, 0), ignore_functions=(1, 2, 3, 4))
+            for pending in self.pending_requests:
+                self.exchange(t, pending)
+        self.run_job(job)
+
     def send_requests(self):
         frames = [parse_frame(line) for line in self.request_text.get('1.0', 'end').splitlines() if line.strip()]
         if not frames:
             raise ValueError('Запрос пуст')
+        if self.streaming:
+            self.pending_requests = frames
+            self.stream_stop.set()
+            return
         snapshot = self.session_value()
         def job(t):
             t.log.write('session_snapshot', session=snapshot, configuration_status='Editor snapshot, not verified device state')
@@ -355,10 +400,13 @@ class App(tk.Tk):
             kind, text = self.events.get_nowait()
             self.output.configure(state='normal')
             self.output.insert('end', text+'\n')
+            if int(self.output.index('end-1c').split('.')[0]) > 1000:
+                self.output.delete('1.0', '201.0')
             self.output.see('end')
             self.output.configure(state='disabled')
             if kind in ('done', 'error', 'disconnected'):
                 self.busy = False
+                self.streaming = False
                 self.status.set(text)
                 if kind == 'disconnected':
                     try:
