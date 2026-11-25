@@ -130,7 +130,11 @@ class App(tk.Tk):
         self.start_stream_button.pack(anchor='w')
         self.stop_stream_button = ttk.Button(requests, text='Остановить поток', command=self.stream_stop.set)
         self.stop_stream_button.pack(anchor='w')
-        ttk.Label(requests, text='Ответы и события').pack(anchor='w')
+        output_bar = ttk.Frame(requests)
+        output_bar.pack(fill='x')
+        ttk.Label(output_bar, text='Ответы и события').pack(side='left')
+        self.clear_output_button = ttk.Button(output_bar, text='Очистить', command=self.clear_output)
+        self.clear_output_button.pack(side='right')
         self.output = tk.Text(requests, height=12, font=('Consolas', 10), state='disabled', wrap='word')
         self.output.pack(fill='both', expand=True)
         footer = ttk.Frame(outer)
@@ -143,7 +147,7 @@ class App(tk.Tk):
         self.device_controls = []
         def collect(parent):
             for widget in parent.winfo_children():
-                if isinstance(widget, (ttk.Button, ttk.Checkbutton, ttk.Entry, ttk.Combobox, ttk.Spinbox, tk.Text)) and widget is not self.output:
+                if isinstance(widget, (ttk.Button, ttk.Checkbutton, ttk.Entry, ttk.Combobox, ttk.Spinbox, tk.Text)) and widget not in (self.output, self.clear_output_button):
                     self.device_controls.append((widget, str(widget.cget('state'))))
                 collect(widget)
         collect(config)
@@ -413,6 +417,11 @@ class App(tk.Tk):
             self.update_controls()
         else:
             self.run_job(job)
+
+    def clear_output(self):
+        self.output.configure(state='normal')
+        self.output.delete('1.0', 'end')
+        self.output.configure(state='disabled')
 
     def poll_events(self):
         for _ in range(200):
