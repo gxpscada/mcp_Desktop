@@ -4,13 +4,15 @@ import json
 import queue
 import threading
 import time
+from datetime import datetime, timezone
+from presentation import validate_view, line_enabled, series_values, response_lines
 from plot import TemperaturePlot
 import tkinter as tk
 from pathlib import Path
 from tkinter import ttk, filedialog, messagebox, simpledialog
 from core import (DEFAULT_APP, DEFAULT_SESSION, DEFAULT_REQUESTS, read_json, save_json,
                   validate_session, configuration_frames, request_frames, parse_frame,
-                  ExchangeLog, Transport, export_log, frame, ascii_encode)
+                  ExchangeLog, Transport, export_log, frame, ascii_encode, read_device_session)
 
 ROOT = Path(__file__).resolve().parent
 
@@ -23,6 +25,7 @@ class App(tk.Tk):
         self.minsize(960, 740)
         self.port = None
         self.log = None
+        self.active_spec = {}
         self.busy = False
         self.streaming = False
         self.stream_stop = threading.Event()
@@ -70,7 +73,7 @@ class App(tk.Tk):
         tabs.add(config, text='  Сеанс и калибровка  ')
         tabs.add(requests, text='  Запросы и ответы  ')
         self.plot = TemperaturePlot(tabs)
-        tabs.add(self.plot, text='  График температур  ')
+        tabs.add(self.plot, text='  Графики данных  ')
         bar = ttk.Frame(config)
         bar.pack(fill='x')
         for text, action in [('Открыть JSON', self.load_session), ('Сохранить как…', self.save_session),
@@ -256,6 +259,7 @@ class App(tk.Tk):
         if not isinstance(values, list) or not values:
             raise ValueError('requests.json должен содержать непустой массив')
         for request in values:
+            validate_view(request)
             if not isinstance(request['title'], str):
                 raise ValueError('title должен быть строкой')
             for data in request_frames(request, 1):
@@ -287,16 +291,23 @@ class App(tk.Tk):
             except ImportError:
                 raise RuntimeError('Установите pyserial: python -m pip install -r requirements.txt') from None
             s = self.settings_value()
-            session = self.session_value()
+            session = copy.deepcopy(DEFAULT_SESSION)
             port = serial.Serial(s['port'], s['baudrate'], bytesize=8, parity=s['parity'], stopbits=s['stopbits'], timeout=.05, write_timeout=s['timeout'])
             try:
-                log = ExchangeLog(ROOT/'logs', session, s)
+                log = ExchangeLog(ROOT/'logs'/datetime.now().strftime('%Y%m%d_%H%M%S_%f_connection'), session, s)
             except Exception:
                 port.close()
                 raise
             self.port, self.settings, self.log = port, s, log
             self.connect_button.configure(text='Отключить')
-            self.status.set(f"Подключено: {s['port']} • адрес {s['address']} • {log.path.name}")
+            self.active_spec = {}
+            def initialize(t):
+                actual = read_device_session(t, s['address'])
+                actual['continuous_receive'] = False
+                log.set_session(actual)
+                save_json(ROOT/'session.json', actual)
+                self.events.put(('session', (actual, ROOT/'session.json')))
+            self.run_job(initialize)
         self.guard(action)
         self.update_controls()
 
@@ -310,24 +321,34 @@ class App(tk.Tk):
         def worker():
             try:
                 fn(transport)
-                self.events.put(('done', 'Операция завершена'))
+                self.events.put(('done', '//Операция завершена'))
             except Exception as exc:
                 from serial import SerialException
                 self.events.put(('disconnected' if isinstance(exc, (SerialException, OSError)) else 'error', str(exc)))
         threading.Thread(target=worker, daemon=True).start()
 
+    def request_spec(self, frames):
+        selected = self.requests[self.request_choice.current()]
+        if selected.get('action') or frames == request_frames(selected, frames[0][0]):
+            return copy.deepcopy(selected)
+        return {}
+
+    def emit_response(self, transport, request, result, spec):
+        for line in response_lines(request, transport, result, spec):
+            self.events.put(('text', line))
+
     def exchange(self, transport, request):
-        self.events.put(('text', 'TX  '+ascii_encode(request).decode().rstrip('\r\n')))
+        spec = self.active_spec
+        transport.presentation_spec = spec
+        if line_enabled(spec, 'tx_data'):
+            self.events.put(('text', 'TX  '+ascii_encode(request).decode().rstrip('\r\n')))
         try:
             result = transport.transact(request)
-        finally:
-            if transport.last_ascii:
-                self.events.put(('text', 'RX ASCII  '+transport.last_ascii.rstrip('\r\n')))
-        self.events.put(('text', transport.last_space+' '+json.dumps(transport.last_registers, ensure_ascii=False)))
-        if request[1] == 4:
-            physical = {k: v for k, v in result.items() if k.startswith(('T', 'R', 'ADC', 'rtc'))}
-            if physical:
-                self.events.put(('text', 'Значения '+json.dumps(physical, ensure_ascii=False)))
+        except Exception:
+            if line_enabled(spec, 'rx_data') and transport.last_ascii:
+                self.events.put(('text', 'RX  '+transport.last_ascii.rstrip('\r\n')))
+            raise
+        self.emit_response(transport, request, result, spec)
         return result
 
     def start_stream(self):
@@ -337,28 +358,46 @@ class App(tk.Tk):
         if self.busy or self.port is None or not self.port.is_open:
             raise ValueError('Подключите прибор и дождитесь завершения операции')
         request = requests[0]
+        spec = self.request_spec(requests)
+        self.active_spec = spec
+        settings = copy.deepcopy(self.settings)
         self.pending_requests = []
         self.after_stream_job = None
         self.plot.clear()
         self.stream_stop.clear()
         self.streaming = True
         def job(t):
+            actual = read_device_session(t, request[0])
+            actual.update(continuous_receive=True, request=spec or dict(function=request[1],
+                start=int.from_bytes(request[2:4], 'big'), count=int.from_bytes(request[4:6], 'big')),
+                started_at=datetime.now(timezone.utc).isoformat())
+            directory = ROOT/'logs'/datetime.now().strftime('%Y%m%d_%H%M%S_%f_continuous')
+            stream_log = ExchangeLog(directory, actual, settings)
+            stream_log.set_session(actual)
+            previous_log = t.log
+            t.log = stream_log
+            t.presentation_spec = spec
+            self.events.put(('session', (actual, directory/'session.json')))
             try:
                 self.exchange(t, frame(request[0], 5, 9, 65280))
                 first = self.exchange(t, request)
-                self.events.put(('plot', (time.monotonic(), first)))
+                self.events.put(('plot', (time.monotonic(), series_values(request, t.last_registers, first, spec))))
                 while not self.stream_stop.is_set():
                     result = t.transact(request, send_request=False, stop=self.stream_stop)
                     if result is not None:
-                        self.events.put(('plot', (time.monotonic(), result)))
-                        self.events.put(('text', 'RX ASCII  '+t.last_ascii.rstrip('\r\n')))
-                        self.events.put(('text', t.last_space+' '+json.dumps(t.last_registers, ensure_ascii=False)))
-                        self.events.put(('text', 'Значения '+json.dumps(result, ensure_ascii=False)))
+                        self.events.put(('plot', (time.monotonic(), series_values(request, t.last_registers, result, spec))))
+                        self.emit_response(t, request, result, spec)
             finally:
                 # FC05 отличается от повторяемого FC01–04: пропускаем остатки потока до ACK.
-                t.transact(frame(request[0], 5, 9, 0), ignore_functions=(1, 2, 3, 4))
+                try:
+                    t.transact(frame(request[0], 5, 9, 0), ignore_functions=(1, 2, 3, 4))
+                finally:
+                    stream_log.write('stream_end')
+                    t.log = previous_log
             if self.after_stream_job is not None:
                 self.after_stream_job(t)
+            if self.pending_requests:
+                self.active_spec = self.pending_spec
             for pending in self.pending_requests:
                 self.exchange(t, pending)
         self.run_job(job)
@@ -368,9 +407,11 @@ class App(tk.Tk):
         if not frames:
             raise ValueError('Запрос пуст')
         if self.streaming:
+            self.pending_spec = self.request_spec(frames)
             self.pending_requests = frames
             self.stream_stop.set()
             return
+        self.active_spec = self.request_spec(frames)
         snapshot = self.session_value()
         def job(t):
             t.log.write('session_snapshot', session=snapshot, configuration_status='Editor snapshot, not verified device state')
@@ -431,8 +472,17 @@ class App(tk.Tk):
             if kind == 'plot':
                 self.plot.add(*text)
                 continue
+            if kind == 'session':
+                actual, path = text
+                self.session_path = path
+                # Поля были заблокированы на время чтения; временно разрешаем обновить JSON.
+                self.metadata.configure(state='normal')
+                self.show_session(actual)
+                self.update_controls()
+                continue
             self.output.configure(state='normal')
-            self.output.insert('end', text+'\n')
+            if kind != 'done' or line_enabled(self.active_spec, 'status'):
+                self.output.insert('end', text+'\n')
             if int(self.output.index('end-1c').split('.')[0]) > 1000:
                 self.output.delete('1.0', '201.0')
             self.output.see('end')

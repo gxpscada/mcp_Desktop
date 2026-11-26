@@ -9,7 +9,55 @@
     "title": "Температуры T0–T7",
     "function": 4,
     "start": 21,
-    "count": 8
+    "count": 8,
+    "view": {
+      "lines": {
+        "tx_data": true,
+        "rx_data": true,
+        "modbus_field_type": true,
+        "json": true,
+        "human": true,
+        "status": true
+      },
+      "values": [
+        {
+          "title": "valT0",
+          "value": {
+            "notation": "DEC",
+            "gain": 0.01,
+            "precision": 2
+          }
+        },
+        {
+          "title": "valT1",
+          "value": {
+            "notation": "DEC",
+            "gain": 0.01,
+            "precision": 2
+          }
+        },
+        {
+          "title": "valT2",
+          "value": {
+            "notation": "DEC",
+            "gain": 0.01,
+            "precision": 2
+          }
+        },
+        {
+          "title": "valT3",
+          "value": {
+            "notation": "DEC",
+            "gain": 0.01,
+            "precision": 2
+          }
+        }
+      ],
+      "export_format": {
+        "first_line_titles": true,
+        "separator": " "
+      }
+    }
   },
   {
     "title": "АЦП T0–T7",

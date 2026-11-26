@@ -216,6 +216,23 @@ def register_view(request, response):
                    for i, v in enumerate(values)}
 
 
+def read_device_session(transport, address):
+    regs = transport.transact(frame(address, 3, 0, 27))
+    mask = transport.transact(frame(address, 3, 29, 1))['001D']
+    flags = int(transport.transact(frame(address, 1, 6, 3))['bits_hex'], 16)
+    words = [regs[f'{i:04X}'] for i in range(27)]
+    session = copy.deepcopy(DEFAULT_SESSION)
+    session.update(channel_count=words[0], channel_mask=mask,
+                   calibration_enabled=bool(flags & 4))
+    session['filters'] = dict(median_enabled=bool(flags & 1), average_enabled=bool(flags & 2),
+                              median_window=words[26], average_window=words[25])
+    session['channels'] = [dict(rref_x10=words[1+i],
+        b=words[9+i] if words[9+i] < 32768 else words[9+i]-65536,
+        k_x100=words[17+i]) for i in range(8)]
+    session['configuration_status'] = 'read_from_device'
+    return validate_session(session)
+
+
 class ExchangeLog:
     def __init__(self, directory, session, application):
         Path(directory).mkdir(parents=True, exist_ok=True)
@@ -223,7 +240,20 @@ class ExchangeLog:
         self.write('header', session=copy.deepcopy(session), application=application,
                    configuration_status='Session snapshot; device state is not verified')
 
+    def set_session(self, session):
+        lines = self.path.read_text(encoding='utf-8').splitlines()
+        header = json.loads(lines[0])
+        header.update(session=copy.deepcopy(session), configuration_status='read_from_device')
+        lines[0] = json.dumps(header, ensure_ascii=False, allow_nan=False)
+        self.path.write_text('\n'.join(lines)+'\n', encoding='utf-8')
+        save_json(self.path.parent/'session.json', session)
+
     def write(self, event, **fields):
+        fields.pop('hex', None)
+        fields.pop('received_hex', None)
+        if 'registers' in fields:
+            fields['registers'] = {k: v.get('DEC') if isinstance(v, dict) else v
+                                   for k, v in fields['registers'].items()}
         record = dict(time=datetime.now(timezone.utc).isoformat(), event=event, **fields)
         with self.path.open('a', encoding='utf-8') as stream:
             stream.write(json.dumps(record, ensure_ascii=False, allow_nan=False)+'\n')
@@ -231,20 +261,24 @@ class ExchangeLog:
 
 def export_log(source, destination):
     rows, columns = [], []
+    export = {}
     with Path(source).open(encoding='utf-8-sig') as stream:
         for line in stream:
             item = json.loads(line)
-            if item['event'] != 'rx' or not item.get('data') or item.get('function') not in (3, 4):
+            if item['event'] == 'header':
+                export = item.get('session', {}).get('request', {}).get('view', {}).get('export_format', {})
+            if item['event'] != 'rx' or not item.get('data') or item.get('function') not in (1, 2, 3, 4):
                 continue
-            row = dict(pc_utc=item['time'], **item['data'])
+            row = dict(pc_utc=item['time'], **item.get('display_data', item['data']))
             rows.append(row)
             for key in row:
                 if key not in columns:
                     columns.append(key)
     with Path(destination).open('w', encoding='utf-8-sig', newline='') as stream:
         import csv
-        writer = csv.writer(stream, delimiter='\t')
-        writer.writerow(columns or ['pc_utc'])
+        writer = csv.writer(stream, delimiter=export.get('separator', '\t'))
+        if export.get('first_line_titles', True):
+            writer.writerow(columns or ['pc_utc'])
         for row in rows:
             writer.writerow(['NA' if row.get(c) is None else str(row[c]) for c in columns])
     return len(rows)
@@ -256,6 +290,7 @@ class Transport:
         self.last_ascii = ''
         self.last_registers = {}
         self.last_space = ''
+        self.presentation_spec = {}
 
     def transact(self, request, send_request=True, stop=None, ignore_functions=()):
         self.last_ascii = ''
@@ -314,7 +349,10 @@ class Transport:
             decoded = decode(request, result)
             self.last_ascii = received_wire.decode('ascii')
             self.last_space, self.last_registers = register_view(request, result)
-            self.log.write('rx', protocol='modbus-ascii', ascii=received_wire.decode('ascii'), hex=received_wire.hex(' '), function=request[1], space=self.last_space, registers=self.last_registers, data=decoded)
+            from presentation import series_values
+            display_data = series_values(request, self.last_registers, decoded, self.presentation_spec)
+            self.log.write('rx', protocol='modbus-ascii', ascii=received_wire.decode('ascii'), function=request[1], space=self.last_space, registers=self.last_registers, data=decoded,
+                           **({'display_data': display_data} if self.presentation_spec.get('view', {}).get('values') or request[1] in (1, 2) else {}))
             return decoded
         except Exception as exc:
             self.log.write('error', message=str(exc), received_hex=(received_wire if 'received_wire' in locals() else bytes(result)).hex(' '))
