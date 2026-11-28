@@ -58,6 +58,25 @@ class GuiTests(unittest.TestCase):
         p.redraw()
         self.assertTrue(p.canvas.find_all())
 
+    def test_idle_does_not_reconfigure_controls_and_transitions_still_work(self):
+        a = self.app
+        a.update_controls()
+        with patch.object(a.start_stream_button, 'configure') as configure:
+            for _ in range(100): a.update_controls()
+            configure.assert_not_called()
+        a.port = SimpleNamespace(is_open=True)
+        a.update_controls()
+        self.assertEqual(str(a.start_stream_button.cget('state')), 'normal')
+        a.busy = True
+        a.update_controls()
+        self.assertEqual(str(a.start_stream_button.cget('state')), 'disabled')
+        a.busy = False
+        a.update_controls()
+        self.assertEqual(str(a.start_stream_button.cget('state')), 'normal')
+        a.port = None
+        a.update_controls()
+        self.assertEqual(str(a.start_stream_button.cget('state')), 'disabled')
+
     def test_flash_gate_and_cancel(self):
         a = self.app
         a.port = SimpleNamespace(is_open=True)

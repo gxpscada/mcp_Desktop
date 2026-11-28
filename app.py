@@ -48,8 +48,10 @@ class App(tk.Tk):
         style.configure('TButton', padding=(10, 6))
         outer = ttk.Frame(self, padding=18)
         outer.pack(fill='both', expand=True)
-        ttk.Label(outer, text='Температуры', style='Title.TLabel').pack(anchor='w')
-        ttk.Label(outer, text='PT100 / MAX31865   •   Настройка и одиночный обмен   •   Modbus ASCII').pack(anchor='w', pady=(2, 14))
+        heading = ttk.Frame(outer)
+        heading.pack(fill='x', pady=(0, 8))
+        ttk.Label(heading, text='Температуры', style='Title.TLabel').pack(side='left')
+        ttk.Label(heading, text='PT100 / MAX31865   •   Настройка и одиночный обмен   •   Modbus ASCII').pack(side='left', padx=(24, 0))
         connection = ttk.LabelFrame(outer, text='Подключение', padding=10)
         connection.pack(fill='x')
         self.connection_vars = {}
@@ -68,11 +70,8 @@ class App(tk.Tk):
         self.connect_button = ttk.Button(connection, text='Подключить', command=self.connect)
         self.connect_button.grid(row=1, column=7)
         ttk.Button(connection, text='Сохранить', command=lambda: self.guard(self.save_settings)).grid(row=1, column=8, padx=5)
+        ttk.Button(connection, text='Экспорт .log → .txt', command=lambda: self.guard(self.export)).grid(row=1, column=9, padx=(5, 0))
         self.status = tk.StringVar(value='Не подключено • параметры линии: 8 бит данных')
-        status_bar = ttk.Frame(outer)
-        status_bar.pack(fill='x', pady=8)
-        ttk.Button(status_bar, text='Экспорт .log → .txt', command=lambda: self.guard(self.export)).pack(side='right', padx=(8, 0))
-        ttk.Label(status_bar, textvariable=self.status, wraplength=700).pack(side='left', fill='x', expand=True)
         tabs = ttk.Notebook(outer)
         tabs.pack(fill='both', expand=True)
         config_page = ttk.Frame(tabs)
@@ -89,6 +88,20 @@ class App(tk.Tk):
         config_canvas.bind('<Configure>', lambda event: config_canvas.itemconfigure(config_window, width=max(event.width, config.winfo_reqwidth())))
         requests = ttk.Frame(tabs, padding=12)
         tabs.add(config_page, text='  Сеанс и калибровка  ')
+        calculation_page = ttk.Frame(tabs)
+        tabs.add(calculation_page, text='  Расчёт калибровки  ')
+        calculation_canvas = tk.Canvas(calculation_page, highlightthickness=0)
+        calculation_vertical = ttk.Scrollbar(calculation_page, orient='vertical', command=calculation_canvas.yview)
+        calculation_horizontal = ttk.Scrollbar(calculation_page, orient='horizontal', command=calculation_canvas.xview)
+        calculation_horizontal.pack(side='bottom', fill='x')
+        calculation_vertical.pack(side='right', fill='y')
+        calculation_canvas.pack(side='left', fill='both', expand=True)
+        calculation_canvas.configure(yscrollcommand=calculation_vertical.set, xscrollcommand=calculation_horizontal.set)
+        calculation_content = ttk.Frame(calculation_canvas, padding=12)
+        calculation_window = calculation_canvas.create_window((0, 0), window=calculation_content, anchor='nw')
+        calculation_content.bind('<Configure>', lambda _: calculation_canvas.configure(scrollregion=calculation_canvas.bbox('all')))
+        calculation_canvas.bind('<Configure>', lambda event: calculation_canvas.itemconfigure(
+            calculation_window, width=max(event.width, calculation_content.winfo_reqwidth())))
         tabs.add(requests, text='  Запросы и ответы  ')
         self.plot = TemperaturePlot(tabs)
         tabs.add(self.plot, text='  Графики данных  ')
@@ -100,11 +113,9 @@ class App(tk.Tk):
             button.pack(side='left', padx=(0, 6))
             if action == self.configure_device:
                 self.device_buttons.append(button)
-        memory_bar = ttk.Frame(config)
-        memory_bar.pack(fill='x', pady=(6, 0))
-        self.read_config_button = ttk.Button(memory_bar, text='Считать конфигурацию', command=lambda: self.guard(self.read_configuration))
+        self.read_config_button = ttk.Button(bar, text='Считать конфигурацию', command=lambda: self.guard(self.read_configuration))
         self.read_config_button.pack(side='left', padx=(0, 6))
-        self.flash_button = ttk.Button(memory_bar, text='Сохранить во Flash', command=lambda: self.guard(self.save_flash))
+        self.flash_button = ttk.Button(bar, text='Сохранить во Flash', command=lambda: self.guard(self.save_flash))
         self.flash_button.pack(side='left', padx=(0, 6))
         self.session_label = tk.StringVar(value=str(self.session_path.name))
         ttk.Label(config, textvariable=self.session_label).pack(anchor='w', pady=8)
@@ -133,7 +144,7 @@ class App(tk.Tk):
                 ttk.Entry(table, textvariable=row[key], width=20).grid(row=i+1, column=col, padx=10, pady=2)
             self.channels.append(row)
         ttk.Label(config, text='Фильтры общие. b применяется к АЦП до CVD; k — к температуре. Число каналов ограничено сборкой платы.').pack(anchor='w')
-        calibration_box = ttk.LabelFrame(config, text='Расчёт калибровки по эталонным точкам', padding=8)
+        calibration_box = ttk.LabelFrame(calculation_content, text='Расчёт калибровки по эталонным точкам', padding=8)
         calibration_box.pack(fill='x', pady=10)
         ttk.Label(calibration_box, text='Температуры вводите при b = 0, k = 1 (k ×100 = 100). АЦП — до коррекции, 15 бит; Q1 делите на 2.').pack(anchor='w')
         ttk.Label(calibration_box, text='Нужны две разные точки. При заполнении АЦП и температуры одной точки используется АЦП. R0 должен совпадать с прошивкой.').pack(anchor='w')
@@ -142,10 +153,10 @@ class App(tk.Tk):
         fields = [('r0', 'Тип датчика / R0, Ом', '1000'),
                   ('reference', 'Произвольный эталон, °C', ''),
                   ('adc_zero', 'АЦП при эталоне 0 °C', ''),
-                  ('adc_fixed', 'АЦП при эталоне 29,76 °C', ''),
+                  ('adc_fixed', 'АЦП при эталоне 29,76(Ga) °C', ''),
                   ('adc_custom', 'АЦП при произвольном эталоне', ''),
                   ('temp_zero', 'Температура при эталоне 0 °C', ''),
-                  ('temp_fixed', 'Температура при эталоне 29,76 °C', ''),
+                  ('temp_fixed', 'Температура при эталоне 29,76(Ga) °C', ''),
                   ('temp_custom', 'Температура при произвольном эталоне', '')]
         for row_index, (_, label, _) in enumerate(fields, 1):
             ttk.Label(calibration_table, text=label).grid(row=row_index, column=0, sticky='w', pady=2)
@@ -164,7 +175,7 @@ class App(tk.Tk):
             self.calibration_inputs.append(variables)
             ttk.Button(calibration_table, text='Расчёт', command=lambda channel=i: self.guard(
                 lambda: self.calculate_channel(channel))).grid(row=len(fields)+1, column=i+1, padx=2, pady=5)
-        self.calculation_status = tk.StringVar(value='Результат подставляется в b и k ×100 выбранного датчика. Отправка — кнопкой «Отправить конфигурацию».')
+        self.calculation_status = tk.StringVar(value='Результат подставляется в b и k ×100 на вкладке «Сеанс и калибровка». Отправка — кнопкой «Отправить конфигурацию» на той же вкладке.')
         ttk.Label(calibration_box, textvariable=self.calculation_status, wraplength=900).pack(anchor='w')
         ttk.Label(config, text='Дополнительные поля сеанса (JSON; сохраняются на ПК)').pack(anchor='w', pady=(12, 4))
         self.metadata = tk.Text(config, height=4, font=('Consolas', 10), wrap='word')
@@ -203,13 +214,15 @@ class App(tk.Tk):
         ttk.Label(requests, text='Полученная команда: Modbus ASCII + LRC (CRLF добавляется при отправке)').pack(anchor='w')
         self.request_text = tk.Text(requests, height=3, font=('Consolas', 12), wrap='word', state='disabled')
         self.request_text.pack(fill='x')
-        send_button = ttk.Button(requests, text='Отправить кадры', command=lambda: self.guard(self.send_requests))
-        send_button.pack(anchor='w', pady=10)
+        send_bar = ttk.Frame(requests)
+        send_bar.pack(fill='x', pady=10)
+        send_button = ttk.Button(send_bar, text='Отправить кадры', command=lambda: self.guard(self.send_requests))
+        send_button.pack(side='left', padx=(0, 8))
         self.device_buttons.append(send_button)
-        self.start_stream_button = ttk.Button(requests, text='Непрерывное чтение', command=lambda: self.guard(self.start_stream))
-        self.start_stream_button.pack(anchor='w')
-        self.stop_stream_button = ttk.Button(requests, text='Остановить поток', command=self.stream_stop.set)
-        self.stop_stream_button.pack(anchor='w')
+        self.start_stream_button = ttk.Button(send_bar, text='Непрерывное чтение', command=lambda: self.guard(self.start_stream))
+        self.start_stream_button.pack(side='left', padx=(0, 8))
+        self.stop_stream_button = ttk.Button(send_bar, text='Остановить поток', command=self.stream_stop.set)
+        self.stop_stream_button.pack(side='left')
         output_bar = ttk.Frame(requests)
         output_bar.pack(fill='x')
         ttk.Label(output_bar, text='Ответы и события').pack(side='left')
@@ -227,14 +240,20 @@ class App(tk.Tk):
                     self.device_controls.append((widget, str(widget.cget('state'))))
                 collect(widget)
         collect(config)
+        collect(calculation_content)
         config_count = len(self.device_controls)
         collect(requests)
         self.request_controls = self.device_controls[config_count:]
         self.update_controls()
         self.after(80, self.poll_events)
 
-    def update_controls(self):
+    def update_controls(self, force=False):
         connected = self.port is not None and self.port.is_open
+        state_key = (connected, self.busy, self.streaming, self.ram_verified,
+                     self.editor_rtc, self.command_fields['function'].get())
+        if not force and getattr(self, '_controls_state', None) == state_key:
+            return
+        self._controls_state = state_key
         for widget, initial_state in self.device_controls:
             widget.configure(state=initial_state if connected and not self.busy else "disabled")
         self.connect_button.state(["disabled" if self.busy else "!disabled"])
@@ -698,7 +717,7 @@ class App(tk.Tk):
                 # Поля были заблокированы на время чтения; временно разрешаем обновить JSON.
                 self.metadata.configure(state='normal')
                 self.show_session(actual)
-                self.update_controls()
+                self.update_controls(force=True)
                 continue
             self.output.configure(state='normal')
             if kind != 'done' or line_enabled(self.active_spec, 'status'):
