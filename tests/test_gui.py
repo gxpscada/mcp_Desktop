@@ -58,6 +58,32 @@ class GuiTests(unittest.TestCase):
         p.redraw()
         self.assertTrue(p.canvas.find_all())
 
+    def test_calculation_updates_only_selected_channel_without_exchange(self):
+        from calibration import ratio
+        a = self.app
+        original = [{key: var.get() for key, var in row.items()} for row in a.channels]
+        i = 2
+        a.channels[i]['rref_x10'].set('43000')
+        a.calibration_inputs[i]['r0'].set('1000')
+        for key, ref in [('zero', 0), ('fixed', 29.76)]:
+            a.calibration_inputs[i]['adc_'+key].set(str(32768*1000/4300*ratio(ref/1.05)+20))
+        with patch.object(a, 'run_job', side_effect=AssertionError('Must not send configuration')):
+            a.calculate_channel(i)
+        self.assertEqual(a.channels[i]['b'].get(), '-20')
+        self.assertEqual(a.channels[i]['k_x100'].get(), '105')
+        for channel in range(8):
+            if channel != i:
+                self.assertEqual({key: var.get() for key, var in a.channels[channel].items()}, original[channel])
+        saved = a.session_value()
+        a.calibration_inputs[i]['adc_zero'].set('')
+        a.metadata.configure(state='normal')
+        a.show_session(saved)
+        self.assertEqual(a.calibration_inputs[i]['adc_zero'].get(), saved['calibration_points'][i]['adc_zero'])
+        a.calibration_inputs[i]['adc_fixed'].set('')
+        with self.assertRaises(ValueError):
+            a.calculate_channel(i)
+        self.assertEqual(a.channels[i]['b'].get(), '-20')
+
     def test_csv_full_history_selection_missing_and_clear(self):
         p = self.app.plot
         p.add(10, {'ADC0': 123, 'T0_C': 20})

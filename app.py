@@ -7,6 +7,7 @@ import time
 from datetime import datetime, timezone
 from presentation import validate_view, line_enabled, series_values, response_lines
 from plot import TemperaturePlot
+from calibration import calculate as calculate_calibration
 import tkinter as tk
 from pathlib import Path
 from tkinter import ttk, filedialog, messagebox, simpledialog
@@ -68,9 +69,20 @@ class App(tk.Tk):
         ttk.Label(outer, textvariable=self.status).pack(anchor='w', pady=8)
         tabs = ttk.Notebook(outer)
         tabs.pack(fill='both', expand=True)
-        config = ttk.Frame(tabs, padding=12)
+        config_page = ttk.Frame(tabs)
+        config_canvas = tk.Canvas(config_page, highlightthickness=0)
+        config_scroll = ttk.Scrollbar(config_page, orient='vertical', command=config_canvas.yview)
+        config_horizontal = ttk.Scrollbar(config_page, orient='horizontal', command=config_canvas.xview)
+        config_horizontal.pack(side='bottom', fill='x')
+        config_scroll.pack(side='right', fill='y')
+        config_canvas.pack(side='left', fill='both', expand=True)
+        config_canvas.configure(yscrollcommand=config_scroll.set, xscrollcommand=config_horizontal.set)
+        config = ttk.Frame(config_canvas, padding=12)
+        config_window = config_canvas.create_window((0, 0), window=config, anchor='nw')
+        config.bind('<Configure>', lambda _: config_canvas.configure(scrollregion=config_canvas.bbox('all')))
+        config_canvas.bind('<Configure>', lambda event: config_canvas.itemconfigure(config_window, width=max(event.width, config.winfo_reqwidth())))
         requests = ttk.Frame(tabs, padding=12)
-        tabs.add(config, text='  Сеанс и калибровка  ')
+        tabs.add(config_page, text='  Сеанс и калибровка  ')
         tabs.add(requests, text='  Запросы и ответы  ')
         self.plot = TemperaturePlot(tabs)
         tabs.add(self.plot, text='  Графики данных  ')
@@ -109,6 +121,39 @@ class App(tk.Tk):
                 ttk.Entry(table, textvariable=row[key], width=20).grid(row=i+1, column=col, padx=10, pady=2)
             self.channels.append(row)
         ttk.Label(config, text='Фильтры общие. b применяется к АЦП до CVD; k — к температуре. Число каналов ограничено сборкой платы.').pack(anchor='w')
+        calibration_box = ttk.LabelFrame(config, text='Расчёт калибровки по эталонным точкам', padding=8)
+        calibration_box.pack(fill='x', pady=10)
+        ttk.Label(calibration_box, text='Температуры вводите при b = 0, k = 1 (k ×100 = 100). АЦП — до коррекции, 15 бит; Q1 делите на 2.').pack(anchor='w')
+        ttk.Label(calibration_box, text='Нужны две разные точки. При заполнении АЦП и температуры одной точки используется АЦП. R0 должен совпадать с прошивкой.').pack(anchor='w')
+        calibration_table = ttk.Frame(calibration_box)
+        calibration_table.pack(fill='x', pady=6)
+        fields = [('r0', 'Тип датчика / R0, Ом', '1000'),
+                  ('reference', 'Произвольный эталон, °C', ''),
+                  ('adc_zero', 'АЦП при эталоне 0 °C', ''),
+                  ('adc_fixed', 'АЦП при эталоне 29,76 °C', ''),
+                  ('adc_custom', 'АЦП при произвольном эталоне', ''),
+                  ('temp_zero', 'Температура при эталоне 0 °C', ''),
+                  ('temp_fixed', 'Температура при эталоне 29,76 °C', ''),
+                  ('temp_custom', 'Температура при произвольном эталоне', '')]
+        for row_index, (_, label, _) in enumerate(fields, 1):
+            ttk.Label(calibration_table, text=label).grid(row=row_index, column=0, sticky='w', pady=2)
+        self.calibration_inputs = []
+        for i in range(8):
+            ttk.Label(calibration_table, text=f'T{i}').grid(row=0, column=i+1)
+            variables = {}
+            for row_index, (key, _, default) in enumerate(fields, 1):
+                variable = tk.StringVar(value=default)
+                variables[key] = variable
+                if key == 'r0':
+                    widget = ttk.Combobox(calibration_table, textvariable=variable, values=('100', '1000'), state='readonly', width=7)
+                else:
+                    widget = ttk.Entry(calibration_table, textvariable=variable, width=9)
+                widget.grid(row=row_index, column=i+1, padx=2, pady=2, sticky='ew')
+            self.calibration_inputs.append(variables)
+            ttk.Button(calibration_table, text='Расчёт', command=lambda channel=i: self.guard(
+                lambda: self.calculate_channel(channel))).grid(row=len(fields)+1, column=i+1, padx=2, pady=5)
+        self.calculation_status = tk.StringVar(value='Результат подставляется в b и k ×100 выбранного датчика. Отправка — кнопкой «Отправить конфигурацию».')
+        ttk.Label(calibration_box, textvariable=self.calculation_status, wraplength=900).pack(anchor='w')
         ttk.Label(config, text='Дополнительные поля сеанса (JSON; сохраняются на ПК)').pack(anchor='w', pady=(12, 4))
         self.metadata = tk.Text(config, height=4, font=('Consolas', 10), wrap='word')
         self.metadata.pack(fill='both', expand=True)
@@ -204,10 +249,25 @@ class App(tk.Tk):
                  metadata=json.loads(self.metadata.get('1.0', 'end')))
         s['filters'].update(median_enabled=self.median.get(), average_enabled=self.average.get(),
                             median_window=int(self.median_window.get()), average_window=int(self.average_window.get()))
+        s['calibration_points'] = [{key: var.get() for key, var in row.items()} for row in self.calibration_inputs]
         return validate_session(s)
+
+    def calculate_channel(self, channel):
+        inputs = {key: var.get() for key, var in self.calibration_inputs[channel].items()}
+        result = calculate_calibration(inputs, self.channels[channel]['rref_x10'].get())
+        self.channels[channel]['b'].set(str(result['b']))
+        self.channels[channel]['k_x100'].set(str(result['k_x100']))
+        self.calibration.set(True)
+        self.calculation_status.set(f"T{channel}: b = {result['b']}, k ×100 = {result['k_x100']}; "
+            f"точек: {result['points']}, максимальная расчётная ошибка после округления: {result['max_error']:.3f} °C. "
+            'Значения подставлены; в прибор ещё не отправлены.')
 
     def show_session(self, s):
         self.session = copy.deepcopy(s)
+        for i, row in enumerate(s.get('calibration_points', [])[:8]):
+            for key, value in row.items():
+                if key in self.calibration_inputs[i]:
+                    self.calibration_inputs[i][key].set(str(value))
         mask = s.get('channel_mask', (1 << s['channel_count']) - 1)
         for i, enabled in enumerate(self.channel_enabled):
             enabled.set(bool(mask & (1 << i)))
