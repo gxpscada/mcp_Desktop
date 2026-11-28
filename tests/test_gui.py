@@ -78,6 +78,31 @@ class GuiTests(unittest.TestCase):
             self.assertIn('43000', dialog.call_args.args[1])
             self.assertEqual(dialog.call_args.kwargs['default'], 'no')
 
+    def test_read_configuration_updates_session_without_enabling_flash(self):
+        a = self.app
+        with self.assertRaises(ValueError): a.read_configuration()
+        a.port = SimpleNamespace(is_open=True)
+        actual = copy.deepcopy(DEFAULT_SESSION)
+        actual.update(channel_count=2, channel_mask=3)
+        actual['channels'][0]['b'] = -12
+        t = SimpleNamespace(log=SimpleNamespace(write=lambda *args, **kwargs: None))
+        a.run_job = lambda job: job(t)
+        with tempfile.TemporaryDirectory() as folder, patch('app.ROOT', Path(folder)), \
+             patch('app.read_device_session', return_value=actual):
+            a.read_configuration()
+            self.assertEqual(json.loads((Path(folder)/'session.json').read_text())['channels'][0]['b'], -12)
+            a.poll_events()
+            self.assertEqual(a.channels[0]['b'].get(), '-12')
+            self.assertFalse(a.ram_verified)
+            self.assertEqual(str(a.flash_button.cget('state')), 'disabled')
+        a.streaming = True
+        a.busy = True
+        with patch.object(a, 'run_job') as run:
+            a.read_configuration()
+            run.assert_not_called()
+        self.assertTrue(a.stream_stop.is_set())
+        self.assertTrue(callable(a.after_stream_job))
+
     def test_flash_rechecks_ram_and_waits_for_completion(self):
         a = self.app
         actual = copy.deepcopy(DEFAULT_SESSION)

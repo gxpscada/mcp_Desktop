@@ -100,7 +100,11 @@ class App(tk.Tk):
             button.pack(side='left', padx=(0, 6))
             if action == self.configure_device:
                 self.device_buttons.append(button)
-        self.flash_button = ttk.Button(bar, text='Сохранить во Flash', command=lambda: self.guard(self.save_flash))
+        memory_bar = ttk.Frame(config)
+        memory_bar.pack(fill='x', pady=(6, 0))
+        self.read_config_button = ttk.Button(memory_bar, text='Считать конфигурацию', command=lambda: self.guard(self.read_configuration))
+        self.read_config_button.pack(side='left', padx=(0, 6))
+        self.flash_button = ttk.Button(memory_bar, text='Сохранить во Flash', command=lambda: self.guard(self.save_flash))
         self.flash_button.pack(side='left', padx=(0, 6))
         self.session_label = tk.StringVar(value=str(self.session_path.name))
         ttk.Label(config, textvariable=self.session_label).pack(anchor='w', pady=8)
@@ -571,6 +575,29 @@ class App(tk.Tk):
                 if data[1] == 5 and 1 <= int.from_bytes(data[2:4], 'big') <= 5 and data[4:6] == b'\xff\x00' and data[2:4] != b'\x00\x04':
                     t.wait_command(data[0], int.from_bytes(data[2:4], 'big'))
         self.run_job(job)
+
+    def read_configuration(self):
+        if self.port is None or not self.port.is_open or (self.busy and not self.streaming):
+            raise ValueError('Подключите прибор и дождитесь завершения операции')
+        address = self.settings['address']
+        metadata = copy.deepcopy(self.session.get('metadata', {}))
+        def job(t):
+            self.active_spec = {}
+            actual = read_device_session(t, address)
+            actual.update(continuous_receive=False, metadata=metadata)
+            save_json(ROOT/'session.json', actual)
+            t.log.write('configuration_read', session=actual)
+            self.events.put(('session', (actual, ROOT/'session.json')))
+            self.events.put(('text', '// Конфигурация прочитана из RAM STM32 и подставлена в поля'))
+        if self.streaming:
+            self.pending_requests = []
+            self.after_stream_job = job
+            self.streaming = False
+            self.stream_stop.set()
+            self.status.set('Остановка потока → чтение конфигурации…')
+            self.update_controls()
+        else:
+            self.run_job(job)
 
     def configure_device(self):
         s = self.session_value()
