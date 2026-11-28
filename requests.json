@@ -90,20 +90,116 @@
     "count": 2
   },
   {
-    "title": "START",
+    "title": "Записать START",
     "function": 5,
     "start": 0,
     "value": 65280
   },
   {
-    "title": "STOP",
+    "title": "Записать STOP",
     "function": 5,
     "start": 0,
     "value": 0
   },
   {
+    "title": "Читать START/STOP",
+    "function": 1,
+    "start": 0,
+    "count": 1
+  },
+  {
+    "title": "Включить МЕДИАННЫЙ фильтр",
+    "function": 5,
+    "start": 6,
+    "value": 65280
+  },
+  {
+    "title": "Выключить МЕДИАННЫЙ фильтр",
+    "function": 5,
+    "start": 6,
+    "value": 0
+  },
+  {
+    "title": "Читать МЕДИАННЫЙ фильтр",
+    "function": 1,
+    "start": 6,
+    "count": 1
+  },
+  {
+    "title": "Читать Окно МЕДИАННОГО фильтра",
+    "function": 3,
+    "start": 26,
+    "count": 1
+  },
+  {
+    "title": "Включить БЕГ. СРЕД. фильтр",
+    "function": 5,
+    "start": 7,
+    "value": 65280
+  },
+  {
+    "title": "Выключить БЕГ.СРЕД фильтр",
+    "function": 5,
+    "start": 7,
+    "value": 0
+  },
+  {
+    "title": "Читать БЕГ. СРЕД. фильтр",
+    "function": 1,
+    "start": 7,
+    "count": 1
+  },
+  {
+    "title": "Читать Окно БЕГ. СРЕД. фильтра",
+    "function": 3,
+    "start": 25,
+    "count": 1
+  },
+  {
+    "title": "Включить КАЛИБ. Поправки",
+    "function": 5,
+    "start": 8,
+    "value": 65280
+  },
+  {
+    "title": "Выключить КАЛИБ. Поправки",
+    "function": 5,
+    "start": 8,
+    "value": 0
+  },
+  {
+    "title": "Читать  КАЛИБ. Поправки",
+    "function": 1,
+    "start": 8,
+    "count": 1
+  },
+  {
+    "title": "Читать  регистры RTC",
+    "function": 4,
+    "start": 30,
+    "count": 2
+  },
+  {
     "title": "Установить RTC по времени ПК",
     "action": "rtc"
+  },
+  {
+    "title": "Читать Значения Rref 0-8, Ом*10",
+    "function": 3,
+    "start": 1,
+    "count": 8
+  },
+  {
+    "title": "Читать Значения b (R = Rcdv*k+b) 0-8, ед. АЦП",
+    "function": 3,
+    "start": 9,
+    "count": 8
+  },
+  {
+    "title": "Читать Значения k (R = Rcdv*k+b) 0-8, val*100",
+    "function": 3,
+    "start": 17,
+    "count": 8
   },
   {
     "title": "Программные статусы T0–T7",

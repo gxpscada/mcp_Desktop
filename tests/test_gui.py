@@ -58,6 +58,72 @@ class GuiTests(unittest.TestCase):
         p.redraw()
         self.assertTrue(p.canvas.find_all())
 
+    def test_flash_gate_and_cancel(self):
+        a = self.app
+        a.port = SimpleNamespace(is_open=True)
+        a.update_controls()
+        self.assertEqual(str(a.flash_button.cget('state')), 'disabled')
+        with self.assertRaises(ValueError): a.save_flash()
+        a.ram_verified = True
+        a.update_controls()
+        self.assertEqual(str(a.flash_button.cget('state')), 'normal')
+        a.busy = True
+        a.update_controls()
+        self.assertEqual(str(a.flash_button.cget('state')), 'disabled')
+        a.busy = False
+        with patch('app.messagebox.askyesno', return_value=False) as dialog, \
+             patch.object(a, 'run_job') as run:
+            a.confirm_flash(copy.deepcopy(DEFAULT_SESSION))
+            run.assert_not_called()
+            self.assertIn('43000', dialog.call_args.args[1])
+            self.assertEqual(dialog.call_args.kwargs['default'], 'no')
+
+    def test_flash_rechecks_ram_and_waits_for_completion(self):
+        a = self.app
+        actual = copy.deepcopy(DEFAULT_SESSION)
+        sent, waited, logged = [], [], []
+        t = SimpleNamespace(wait_command=lambda *args: waited.append(args),
+            log=SimpleNamespace(write=lambda *args, **kw: logged.append((args, kw))))
+        a.exchange = lambda transport, request: sent.append(request)
+        a.run_job = lambda job: job(t)
+        with patch('app.messagebox.askyesno', return_value=True), \
+             patch('app.read_device_session', return_value=copy.deepcopy(actual)):
+            a.confirm_flash(actual)
+        self.assertEqual([q[1:6].hex() for q in sent], ['0500000000', '050001ff00'])
+        self.assertEqual(waited, [(a.settings['address'], 1)])
+        self.assertEqual(logged[0][0], ('flash_saved',))
+        changed = copy.deepcopy(actual)
+        changed['channels'][0]['b'] = 5
+        sent.clear(); waited.clear()
+        with patch('app.messagebox.askyesno', return_value=True), \
+             patch('app.read_device_session', return_value=changed), self.assertRaises(ValueError):
+            a.confirm_flash(actual)
+        self.assertEqual([q[1:6].hex() for q in sent], ['0500000000'])
+        self.assertEqual(waited, [])
+
+    def test_command_editor_builds_current_fields_and_is_readonly(self):
+        from core import frame, ascii_encode
+        a = self.app
+        a.command_fields['address'].set('2')
+        a.command_fields['function'].set('0x06 — Запись HR')
+        a.command_fields['start'].set('0x001D')
+        a.command_fields['data'].set('5')
+        expected = frame(2, 6, 29, 5)
+        self.assertEqual(a.build_request(), [expected])
+        self.assertEqual(a.request_text.get('1.0', 'end').strip(), ascii_encode(expected).decode().strip())
+        self.assertEqual(str(a.request_text.cget('state')), 'disabled')
+        a.command_fields['data'].set('oops')
+        with self.assertRaises(ValueError): a.build_request()
+        self.assertEqual(a.request_text.get('1.0', 'end').strip(), '')
+        a.port = SimpleNamespace(is_open=True)
+        a.update_controls()
+        self.assertEqual(str(a.command_widgets['count'].cget('state')), 'disabled')
+        self.assertEqual(str(a.command_widgets['data'].cget('state')), 'normal')
+        a.command_fields['function'].set('0x04 — Чтение IR')
+        a.update_command_controls()
+        self.assertEqual(str(a.command_widgets['data'].cget('state')), 'disabled')
+        self.assertEqual(str(a.command_widgets['count'].cget('state')), 'normal')
+
     def test_calculation_updates_only_selected_channel_without_exchange(self):
         from calibration import ratio
         a = self.app

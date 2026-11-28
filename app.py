@@ -8,6 +8,7 @@ from datetime import datetime, timezone
 from presentation import validate_view, line_enabled, series_values, response_lines
 from plot import TemperaturePlot
 from calibration import calculate as calculate_calibration
+from commands import FUNCTIONS, build_command, describe_command
 import tkinter as tk
 from pathlib import Path
 from tkinter import ttk, filedialog, messagebox, simpledialog
@@ -27,6 +28,8 @@ class App(tk.Tk):
         self.port = None
         self.log = None
         self.active_spec = {}
+        self.ram_verified = False
+        self.pending_flash_preview = None
         self.busy = False
         self.streaming = False
         self.stream_stop = threading.Event()
@@ -66,7 +69,10 @@ class App(tk.Tk):
         self.connect_button.grid(row=1, column=7)
         ttk.Button(connection, text='Сохранить', command=lambda: self.guard(self.save_settings)).grid(row=1, column=8, padx=5)
         self.status = tk.StringVar(value='Не подключено • параметры линии: 8 бит данных')
-        ttk.Label(outer, textvariable=self.status).pack(anchor='w', pady=8)
+        status_bar = ttk.Frame(outer)
+        status_bar.pack(fill='x', pady=8)
+        ttk.Button(status_bar, text='Экспорт .log → .txt', command=lambda: self.guard(self.export)).pack(side='right', padx=(8, 0))
+        ttk.Label(status_bar, textvariable=self.status, wraplength=700).pack(side='left', fill='x', expand=True)
         tabs = ttk.Notebook(outer)
         tabs.pack(fill='both', expand=True)
         config_page = ttk.Frame(tabs)
@@ -94,6 +100,8 @@ class App(tk.Tk):
             button.pack(side='left', padx=(0, 6))
             if action == self.configure_device:
                 self.device_buttons.append(button)
+        self.flash_button = ttk.Button(bar, text='Сохранить во Flash', command=lambda: self.guard(self.save_flash))
+        self.flash_button.pack(side='left', padx=(0, 6))
         self.session_label = tk.StringVar(value=str(self.session_path.name))
         ttk.Label(config, textvariable=self.session_label).pack(anchor='w', pady=8)
         options = ttk.Frame(config)
@@ -158,8 +166,6 @@ class App(tk.Tk):
         self.metadata = tk.Text(config, height=4, font=('Consolas', 10), wrap='word')
         self.metadata.pack(fill='both', expand=True)
         self.metadata.insert('1.0', '{}')
-        self.flash = tk.BooleanVar(value=False)
-        ttk.Checkbutton(config, text='После отправки сохранить во Flash (с ожиданием завершения)', variable=self.flash).pack(anchor='w', pady=6)
         ttk.Label(config, text='Отправка: STOP → настройки → флаги → проверка чтением. Измерение остаётся остановленным.').pack(anchor='w')
         request_bar = ttk.Frame(requests)
         request_bar.pack(fill='x')
@@ -167,9 +173,31 @@ class App(tk.Tk):
         self.request_choice.pack(side='left', padx=(0, 8))
         self.request_choice.bind('<<ComboboxSelected>>', lambda e: self.guard(self.preview_request))
         ttk.Button(request_bar, text='Reload requests.json', command=lambda: self.guard(self.reload_requests)).pack(side='left')
-        ttk.Button(request_bar, text='Сформировать', command=lambda: self.guard(self.preview_request)).pack(side='left', padx=8)
-        ttk.Label(requests, text='ASCII: :HEX + LRC. Один кадр на строку; CRLF добавляется при отправке.').pack(anchor='w', pady=(14, 6))
-        self.request_text = tk.Text(requests, height=7, font=('Consolas', 12), wrap='word')
+        ttk.Button(request_bar, text='Сформировать', command=lambda: self.guard(self.build_request)).pack(side='left', padx=8)
+        editor = ttk.LabelFrame(requests, text='Параметры команды', padding=6)
+        editor.pack(fill='x', pady=6)
+        self.command_fields = {key: tk.StringVar() for key in ('address', 'function', 'start', 'count', 'data')}
+        self.command_widgets = {}
+        for column, (key, title, width) in enumerate([
+            ('address', 'Адрес устройства', 8), ('function', 'Функция Modbus', 27),
+            ('start', 'Начальный регистр / COIL', 12), ('count', 'Количество для чтения', 9)]):
+            ttk.Label(editor, text=title).grid(row=0, column=column, sticky='w', padx=4)
+            if key == 'function':
+                widget = ttk.Combobox(editor, textvariable=self.command_fields[key], state='readonly', width=width,
+                    values=[f'0x{fc:02X} — {name}' for fc, name in FUNCTIONS.items()])
+                widget.bind('<<ComboboxSelected>>', lambda _: self.update_command_controls())
+            else:
+                widget = ttk.Entry(editor, textvariable=self.command_fields[key], width=width)
+            widget.grid(row=1, column=column, sticky='ew', padx=4)
+            self.command_widgets[key] = widget
+        ttk.Label(editor, text='Данные для записи').grid(row=2, column=0, sticky='w', padx=4)
+        self.command_widgets['data'] = ttk.Entry(editor, textvariable=self.command_fields['data'])
+        self.command_widgets['data'].grid(row=2, column=1, columnspan=3, sticky='ew', padx=4, pady=5)
+        self.command_hint = tk.StringVar()
+        ttk.Label(editor, textvariable=self.command_hint, wraplength=950).grid(row=3, column=0, columnspan=4, sticky='w', padx=4)
+        self.editor_rtc = False
+        ttk.Label(requests, text='Полученная команда: Modbus ASCII + LRC (CRLF добавляется при отправке)').pack(anchor='w')
+        self.request_text = tk.Text(requests, height=3, font=('Consolas', 12), wrap='word', state='disabled')
         self.request_text.pack(fill='x')
         send_button = ttk.Button(requests, text='Отправить кадры', command=lambda: self.guard(self.send_requests))
         send_button.pack(anchor='w', pady=10)
@@ -185,10 +213,6 @@ class App(tk.Tk):
         self.clear_output_button.pack(side='right')
         self.output = tk.Text(requests, height=12, font=('Consolas', 10), state='disabled', wrap='word')
         self.output.pack(fill='both', expand=True)
-        footer = ttk.Frame(outer)
-        footer.pack(fill='x', pady=(12, 0))
-        ttk.Button(footer, text='Экспорт .log → .txt', command=lambda: self.guard(self.export)).pack(side='left')
-        ttk.Label(footer, text='Лог создаётся при подключении • JSON сеанса в заголовке • пропуски = NA').pack(side='left', padx=12)
         self.reload_requests()
         if self.session_path.exists():
             self.show_session(validate_session(read_json(self.session_path)))
@@ -215,6 +239,8 @@ class App(tk.Tk):
                 if widget is not self.start_stream_button:
                     widget.configure(state=state)
         self.stop_stream_button.configure(state="normal" if self.streaming else "disabled")
+        self.flash_button.configure(state='normal' if connected and self.ram_verified and not self.busy else 'disabled')
+        self.update_command_controls()
 
     def guard(self, fn):
         try:
@@ -331,9 +357,58 @@ class App(tk.Tk):
 
     def preview_request(self):
         address = self.settings['address'] if self.port else self.settings_value()['address']
-        frames = request_frames(self.requests[self.request_choice.current()], address)
+        selected = self.requests[self.request_choice.current()]
+        self.editor_rtc = selected.get('action') == 'rtc'
+        self.command_fields['address'].set(str(address))
+        fc = selected.get('function', 16)
+        self.command_fields['function'].set(f'0x{fc:02X} — {FUNCTIONS[fc]}')
+        self.command_fields['start'].set(f"0x{selected.get('start', 27):04X}")
+        self.command_fields['count'].set(str(selected.get('count', 1)))
+        data = selected.get('values', [selected.get('value', 0)])
+        self.command_fields['data'].set(' '.join(f'0x{v:04X}' for v in data))
+        self.update_command_controls()
+        self.build_request()
+
+    def update_command_controls(self):
+        if not hasattr(self, 'command_widgets'):
+            return
+        connected = self.port is not None and self.port.is_open
+        enabled = connected and (not self.busy or self.streaming)
+        fc = int(self.command_fields['function'].get().split(' ')[0], 16) if self.command_fields['function'].get() else 4
+        for key, widget in self.command_widgets.items():
+            available = enabled and (not self.editor_rtc or key == 'address')
+            if key == 'count': available = available and fc in (1, 2, 3, 4)
+            if key == 'data': available = available and fc in (5, 6, 16)
+            widget.configure(state=('readonly' if key == 'function' else 'normal') if available else 'disabled')
+        if self.editor_rtc:
+            hint = 'RTC: последовательность STOP → запись времени ПК → установка RTC. Время обновляется при отправке.'
+        elif fc == 5:
+            hint = 'DEC, HEX (0x7B), BIN (01111011b / 0b01111011). COIL: 1111111100000000b — включить, 0 — выключить.'
+        elif fc == 16:
+            hint = 'DEC, HEX (0x7B), BIN (01111011b / 0b01111011). Значения разделяйте пробелом, запятой или ;. Количество определяется автоматически.'
+        else:
+            hint = 'Числа: DEC (123), HEX (0x7B), BIN (01111011b / 0b01111011). Адрес регистра — с нуля. LRC рассчитывается автоматически.'
+        self.command_hint.set(hint)
+
+    def build_request(self):
+        values = {key: var.get() for key, var in self.command_fields.items()}
+        try:
+            if self.editor_rtc:
+                from commands import integer
+                frames = request_frames({'action': 'rtc'}, integer(values['address'], 'Адрес устройства'))
+            else:
+                fc = int(values['function'].split(' ')[0], 16)
+                frames = [build_command(values['address'], fc, values['start'], values['count'], values['data'])]
+        except Exception:
+            self.request_text.configure(state='normal')
+            self.request_text.delete('1.0', 'end')
+            self.request_text.configure(state='disabled')
+            raise
+        self.request_text.configure(state='normal')
         self.request_text.delete('1.0', 'end')
         self.request_text.insert('1.0', '\n'.join(ascii_encode(data).decode().rstrip('\r\n') for data in frames))
+        self.request_text.configure(state='disabled')
+        return frames
 
     def connect(self):
         def action():
@@ -342,6 +417,7 @@ class App(tk.Tk):
             if self.port:
                 self.port.close()
                 self.port = None
+                self.ram_verified = False
                 self.connect_button.configure(text='Подключить')
                 self.status.set('Отключено')
                 self.update_controls()
@@ -359,6 +435,7 @@ class App(tk.Tk):
                 port.close()
                 raise
             self.port, self.settings, self.log = port, s, log
+            self.ram_verified = False
             self.connect_button.configure(text='Отключить')
             self.active_spec = {}
             def initialize(t):
@@ -378,6 +455,13 @@ class App(tk.Tk):
         self.update_controls()
         self.status.set('Обмен с прибором…')
         transport = Transport(self.port, self.settings['timeout'], self.log)
+        def sent(request):
+            if line_enabled(self.active_spec, 'status'):
+                description = describe_command(request)
+                if self.active_spec and not self.active_spec.get('action') and request in request_frames(self.active_spec, request[0]):
+                    description += ' — '+self.active_spec.get('title', '')
+                self.events.put(('text', description))
+        transport.on_sent = sent
         def worker():
             try:
                 fn(transport)
@@ -412,7 +496,7 @@ class App(tk.Tk):
         return result
 
     def start_stream(self):
-        requests = [parse_frame(line) for line in self.request_text.get('1.0', 'end').splitlines() if line.strip()]
+        requests = self.build_request()
         if len(requests) != 1 or requests[0][1] not in (1, 2, 3, 4):
             raise ValueError('Для потока нужен один запрос чтения FC01–FC04')
         if self.busy or self.port is None or not self.port.is_open:
@@ -463,9 +547,16 @@ class App(tk.Tk):
         self.run_job(job)
 
     def send_requests(self):
-        frames = [parse_frame(line) for line in self.request_text.get('1.0', 'end').splitlines() if line.strip()]
+        frames = self.build_request()
         if not frames:
             raise ValueError('Запрос пуст')
+        if any(q[1:6] == bytes.fromhex('050001FF00') for q in frames):
+            if len(frames) != 1:
+                raise ValueError('Сохранение во Flash выполняется отдельно, кнопкой «Сохранить во Flash»')
+            self.save_flash()
+            return
+        if any(q[1] in (6, 16) or (q[1] == 5 and int.from_bytes(q[2:4], 'big') in (4, 5, 6, 7, 8)) for q in frames):
+            self.ram_verified = False
         if self.streaming:
             self.pending_spec = self.request_spec(frames)
             self.pending_requests = frames
@@ -485,7 +576,7 @@ class App(tk.Tk):
         s = self.session_value()
         address = self.settings['address']
         frames = configuration_frames(s, address)
-        flash = self.flash.get()
+        self.ram_verified = False
         def job(t):
             t.log.write('configuration_begin', session=s)
             try:
@@ -502,10 +593,8 @@ class App(tk.Tk):
                 wanted = int(s['filters']['median_enabled']) | int(s['filters']['average_enabled']) << 1 | int(s['calibration_enabled']) << 2
                 if bits != wanted:
                     raise ValueError('Проверка флагов не прошла')
-                if flash:
-                    self.exchange(t, frame(address, 5, 1, 65280))
-                    t.wait_command(address, 1)
-                t.log.write('configuration_applied', session=s, flash_saved=flash)
+                t.log.write('configuration_applied', session=s, flash_saved=False)
+                self.events.put(('ram_verified', None))
             except Exception as exc:
                 t.log.write('configuration_failed', message=str(exc), state='Possibly partially applied; read device settings')
                 raise RuntimeError(f'{exc}. Конфигурация могла примениться частично; прочитайте настройки прибора.') from exc
@@ -519,6 +608,44 @@ class App(tk.Tk):
         else:
             self.run_job(job)
 
+    def save_flash(self):
+        if not self.ram_verified or self.busy or self.port is None or not self.port.is_open:
+            raise ValueError('Сначала отправьте конфигурацию в RAM и дождитесь успешной проверки')
+        address = self.settings['address']
+        self.active_spec = {}
+        def prepare(t):
+            actual = read_device_session(t, address)
+            self.events.put(('flash_preview', actual))
+        self.run_job(prepare)
+
+    def confirm_flash(self, actual):
+        f = actual['filters']
+        mask = actual.get('channel_mask', (1 << actual['channel_count'])-1)
+        lines = ['Будет перезаписана постоянная конфигурация прибора.',
+                 'Измерения будут остановлены. Не отключайте питание до завершения.',
+                 'Ниже настройки, прочитанные из RAM; несохранённые правки редактора не включены.', '',
+                 'Выбраны: '+', '.join(f'T{i}' for i in range(8) if mask & (1 << i)),
+                 f"Медиана: {f['median_enabled']}, окно {f['median_window']}; среднее: {f['average_enabled']}, окно {f['average_window']}",
+                 f"Калибровка: {actual['calibration_enabled']}",
+                 'Канал      Rref ×10       b (АЦП)       k ×100']
+        for i, row in enumerate(actual['channels']):
+            lines.append(f"T{i}:       {row['rref_x10']}          {row['b']}          {row['k_x100']}")
+        lines.extend(['', 'Сохранить эти данные во Flash?'])
+        if not messagebox.askyesno('Подтверждение записи во Flash', '\n'.join(lines), icon='warning', default='no', parent=self):
+            self.status.set('Сохранение во Flash отменено')
+            return
+        address = self.settings['address']
+        def save(t):
+            self.exchange(t, frame(address, 5, 0, 0))
+            current = read_device_session(t, address)
+            if current != actual:
+                raise ValueError('Настройки RAM изменились после подтверждения. Повторите сохранение.')
+            self.exchange(t, frame(address, 5, 1, 65280))
+            t.wait_command(address, 1)
+            t.log.write('flash_saved', session=current)
+            self.events.put(('text', '// Конфигурация сохранена во Flash'))
+        self.run_job(save)
+
     def clear_output(self):
         self.output.configure(state='normal')
         self.output.delete('1.0', 'end')
@@ -529,6 +656,12 @@ class App(tk.Tk):
             if self.events.empty():
                 break
             kind, text = self.events.get_nowait()
+            if kind == 'ram_verified':
+                self.ram_verified = True
+                continue
+            if kind == 'flash_preview':
+                self.pending_flash_preview = text
+                continue
             if kind == 'plot':
                 self.plot.add(*text)
                 continue
@@ -550,6 +683,9 @@ class App(tk.Tk):
             if kind in ('done', 'error', 'disconnected'):
                 self.busy = False
                 self.streaming = False
+                if kind != 'done':
+                    self.ram_verified = False
+                    self.pending_flash_preview = None
                 self.status.set(text)
                 if kind == 'disconnected':
                     try:
@@ -561,6 +697,10 @@ class App(tk.Tk):
                 self.update_controls()
                 if kind in ('error', 'disconnected'):
                     messagebox.showerror('Обмен не завершён', text, parent=self)
+                if kind == 'done' and self.pending_flash_preview is not None:
+                    actual = self.pending_flash_preview
+                    self.pending_flash_preview = None
+                    self.guard(lambda: self.confirm_flash(actual))
         if self.plot.dirty:
             self.plot.redraw()
         self.update_controls()

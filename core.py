@@ -291,6 +291,7 @@ class Transport:
         self.last_registers = {}
         self.last_space = ''
         self.presentation_spec = {}
+        self.on_sent = None
 
     def transact(self, request, send_request=True, stop=None, ignore_functions=()):
         self.last_ascii = ''
@@ -304,6 +305,8 @@ class Transport:
                 self.port.reset_input_buffer()
                 if self.port.write(wire) != len(wire):
                     raise IOError('Неполная отправка')
+                if self.on_sent:
+                    self.on_sent(request)
             end = time.monotonic()+self.timeout
             last_byte = time.monotonic()
             while time.monotonic() < end or (stop is not None and not result):
