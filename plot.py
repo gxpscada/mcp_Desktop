@@ -140,6 +140,11 @@ class TemperaturePlot(ttk.Frame):
         xmin, xmax = self.points[0][0], max(self.points[-1][0], self.points[0][0]+1)
         def xy(t, v):
             return left+(t-xmin)/(xmax-xmin)*(right-left), bottom-(v-ymin)/(ymax-ymin)*(bottom-top)
+        for interval in range(5):
+            for subdivision in range(1, 6):
+                v = ymin+(ymax-ymin)*(interval+subdivision/6)/5
+                y = xy(xmin, v)[1]
+                c.create_line(left, y, right, y, fill='#f0f1f3', tags='minor_grid')
         for n in range(6):
             v = ymin+(ymax-ymin)*n/5
             y = xy(xmin, v)[1]
