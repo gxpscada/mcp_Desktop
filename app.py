@@ -482,8 +482,15 @@ class App(tk.Tk):
             if line_enabled(self.active_spec, 'status'):
                 description = describe_command(request)
                 if self.active_spec and not self.active_spec.get('action') and request in request_frames(self.active_spec, request[0]):
-                    description += ' — '+self.active_spec.get('title', '')
+                    description = describe_command(request, self.active_spec.get('title'))
+                else:
+                    for template in self.requests:
+                        if not template.get('action') and request in request_frames(template, request[0]):
+                            description = describe_command(request, template['title'])
+                            break
                 self.events.put(('text', description))
+            if line_enabled(self.active_spec, 'tx_data'):
+                self.events.put(('text', 'TX  '+ascii_encode(request).decode().rstrip('\r\n')))
         transport.on_sent = sent
         def worker():
             try:
@@ -507,8 +514,6 @@ class App(tk.Tk):
     def exchange(self, transport, request):
         spec = self.active_spec
         transport.presentation_spec = spec
-        if line_enabled(spec, 'tx_data'):
-            self.events.put(('text', 'TX  '+ascii_encode(request).decode().rstrip('\r\n')))
         try:
             result = transport.transact(request)
         except Exception:

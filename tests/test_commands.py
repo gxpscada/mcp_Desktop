@@ -30,9 +30,10 @@ class CommandTests(unittest.TestCase):
     def test_description_and_notification_after_actual_write(self):
         request = frame(1, 5, 0, 65280)
         text = describe_command(request)
-        self.assertTrue(text.startswith('// Команда: START'))
-        self.assertIn('адрес=0x0000', text)
-        self.assertIn('данные=0xFF00', text)
+        self.assertEqual(text, '//Записать start')
+        self.assertEqual(describe_command(frame(1, 4, 21, 8)), '//Читать температуры')
+        self.assertEqual(describe_command(request, 'Записать START'), '//Записать START')
+        self.assertEqual(describe_command(request, 'включить МЕДИАННЫЙ фильтр'), '//Включить МЕДИАННЫЙ фильтр')
         events = []
         wire = bytearray(ascii_encode(request))
         def read(n):
